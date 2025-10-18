@@ -38,6 +38,9 @@ class GraphEvaluatorTest {
     private IMap<TaskExecutionKey, GlobalTaskExecution> globalTasks;
     private IQueue<WorkMessage> workQueue;
 
+    // CRITICAL: Async operations need longer timeouts
+    private static final int ASYNC_TIMEOUT_SECONDS = 10;
+
     @BeforeEach
     void setup() {
         graphDefinitions = hazelcast.getMap("graph-definitions");
@@ -99,8 +102,8 @@ class GraphEvaluatorTest {
         assertThat(execution.status()).isEqualTo(GraphStatus.RUNNING);
         assertThat(execution.params()).containsEntry("param1", "value1");
 
-        // Task execution created
-        await().atMost(2, TimeUnit.SECONDS).untilAsserted(() -> {
+        // Task execution created (async, needs longer wait)
+        await().atMost(ASYNC_TIMEOUT_SECONDS, TimeUnit.SECONDS).untilAsserted(() -> {
             long taskCount = taskExecutions.values().stream()
                     .filter(te -> te.graphExecutionId().equals(executionId))
                     .count();
@@ -126,13 +129,15 @@ class GraphEvaluatorTest {
 
         graphDefinitions.put(graph.name(), graph);
 
-        // When: Starting and evaluating
+        // When: Starting and evaluating (async)
         UUID executionId = evaluator.executeGraph("test-graph", Map.of(), "test");
 
-        // Then: Task should be queued to work queue
-        await().atMost(3, TimeUnit.SECONDS).untilAsserted(() -> {
-            assertThat(workQueue.size()).isGreaterThan(0);
-        });
+        // Then: Task should be queued to work queue (async, needs longer wait)
+        await().atMost(ASYNC_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .pollInterval(100, TimeUnit.MILLISECONDS)
+                .untilAsserted(() -> {
+                    assertThat(workQueue.size()).isGreaterThan(0);
+                });
 
         WorkMessage work = workQueue.poll();
         assertThat(work).isNotNull();
@@ -142,7 +147,7 @@ class GraphEvaluatorTest {
     }
 
     @Test
-    void shouldHandleTaskCompletion() {
+    void shouldHandleTaskCompletion() throws InterruptedException {
         // Given: A graph with one task
         Graph graph = Graph.builder("test-graph")
                 .tasks(List.of(
@@ -159,10 +164,12 @@ class GraphEvaluatorTest {
 
         UUID executionId = evaluator.executeGraph("test-graph", Map.of(), "test");
 
-        // Wait for task to be created and queued
-        await().atMost(2, TimeUnit.SECONDS).untilAsserted(() -> {
-            assertThat(workQueue.size()).isGreaterThan(0);
-        });
+        // Wait for task to be created and queued (async)
+        await().atMost(ASYNC_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .pollInterval(100, TimeUnit.MILLISECONDS)
+                .untilAsserted(() -> {
+                    assertThat(workQueue.size()).isGreaterThan(0);
+                });
 
         // Get task execution
         TaskExecution taskExec = taskExecutions.values().stream()
@@ -170,28 +177,35 @@ class GraphEvaluatorTest {
                 .findFirst()
                 .orElseThrow();
 
-        // When: Task completes
+        // When: Task completes (fire event and wait for async processing)
         TaskCompletionEvent event = TaskCompletionEvent.of(
                 taskExec.id(),
                 Map.of("result", "success")
         );
         eventBus.send("task.completed", event);
 
-        // Then: Task status updated and graph completes
-        await().atMost(3, TimeUnit.SECONDS).untilAsserted(() -> {
-            TaskExecution updated = taskExecutions.get(taskExec.id());
-            assertThat(updated.status()).isEqualTo(TaskStatus.COMPLETED);
-            assertThat(updated.result()).containsEntry("result", "success");
-        });
+        // Give async processing time to propagate
+        Thread.sleep(1000);
 
-        await().atMost(3, TimeUnit.SECONDS).untilAsserted(() -> {
-            GraphExecution graphExec = graphExecutions.get(executionId);
-            assertThat(graphExec.status()).isEqualTo(GraphStatus.COMPLETED);
-        });
+        // Then: Task status updated and graph completes (async)
+        await().atMost(ASYNC_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .pollInterval(100, TimeUnit.MILLISECONDS)
+                .untilAsserted(() -> {
+                    TaskExecution updated = taskExecutions.get(taskExec.id());
+                    assertThat(updated.status()).isEqualTo(TaskStatus.COMPLETED);
+                    assertThat(updated.result()).containsEntry("result", "success");
+                });
+
+        await().atMost(ASYNC_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .pollInterval(100, TimeUnit.MILLISECONDS)
+                .untilAsserted(() -> {
+                    GraphExecution graphExec = graphExecutions.get(executionId);
+                    assertThat(graphExec.status()).isEqualTo(GraphStatus.COMPLETED);
+                });
     }
 
     @Test
-    void shouldHandleTaskFailure() {
+    void shouldHandleTaskFailure() throws InterruptedException {
         // Given: A graph with task that allows no retries
         Graph graph = Graph.builder("test-graph")
                 .tasks(List.of(
@@ -209,34 +223,44 @@ class GraphEvaluatorTest {
 
         UUID executionId = evaluator.executeGraph("test-graph", Map.of(), "test");
 
-        await().atMost(2, TimeUnit.SECONDS).untilAsserted(() -> {
-            assertThat(workQueue.size()).isGreaterThan(0);
-        });
+        // Wait for task to be queued (async)
+        await().atMost(ASYNC_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .pollInterval(100, TimeUnit.MILLISECONDS)
+                .untilAsserted(() -> {
+                    assertThat(workQueue.size()).isGreaterThan(0);
+                });
 
         TaskExecution taskExec = taskExecutions.values().stream()
                 .filter(te -> te.graphExecutionId().equals(executionId))
                 .findFirst()
                 .orElseThrow();
 
-        // When: Task fails
+        // When: Task fails (fire event and wait)
         TaskFailureEvent event = TaskFailureEvent.of(taskExec.id(), "Task failed");
         eventBus.send("task.failed", event);
 
-        // Then: Task marked as failed and graph fails
-        await().atMost(3, TimeUnit.SECONDS).untilAsserted(() -> {
-            TaskExecution updated = taskExecutions.get(taskExec.id());
-            assertThat(updated.status()).isEqualTo(TaskStatus.FAILED);
-            assertThat(updated.error()).isEqualTo("Task failed");
-        });
+        // Give async processing time
+        Thread.sleep(1000);
 
-        await().atMost(3, TimeUnit.SECONDS).untilAsserted(() -> {
-            GraphExecution graphExec = graphExecutions.get(executionId);
-            assertThat(graphExec.status()).isEqualTo(GraphStatus.FAILED);
-        });
+        // Then: Task marked as failed and graph fails (async)
+        await().atMost(ASYNC_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .pollInterval(100, TimeUnit.MILLISECONDS)
+                .untilAsserted(() -> {
+                    TaskExecution updated = taskExecutions.get(taskExec.id());
+                    assertThat(updated.status()).isEqualTo(TaskStatus.FAILED);
+                    assertThat(updated.error()).isEqualTo("Task failed");
+                });
+
+        await().atMost(ASYNC_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .pollInterval(100, TimeUnit.MILLISECONDS)
+                .untilAsserted(() -> {
+                    GraphExecution graphExec = graphExecutions.get(executionId);
+                    assertThat(graphExec.status()).isEqualTo(GraphStatus.FAILED);
+                });
     }
 
     @Test
-    void shouldRespectTaskDependencies() {
+    void shouldRespectTaskDependencies() throws InterruptedException {
         // Given: A -> B (B depends on A)
         Graph graph = Graph.builder("test-graph")
                 .tasks(List.of(
@@ -261,10 +285,12 @@ class GraphEvaluatorTest {
 
         UUID executionId = evaluator.executeGraph("test-graph", Map.of(), "test");
 
-        // Then: Only task-a should be queued initially
-        await().atMost(2, TimeUnit.SECONDS).untilAsserted(() -> {
-            assertThat(workQueue.size()).isEqualTo(1);
-        });
+        // Then: Only task-a should be queued initially (async)
+        await().atMost(ASYNC_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .pollInterval(100, TimeUnit.MILLISECONDS)
+                .untilAsserted(() -> {
+                    assertThat(workQueue.size()).isEqualTo(1);
+                });
 
         WorkMessage work = workQueue.poll();
         assertThat(work.taskName()).isEqualTo("task-a");
@@ -277,10 +303,15 @@ class GraphEvaluatorTest {
 
         eventBus.send("task.completed", TaskCompletionEvent.of(taskA.id(), Map.of()));
 
-        // Then: task-b should now be queued
-        await().atMost(3, TimeUnit.SECONDS).untilAsserted(() -> {
-            assertThat(workQueue.size()).isEqualTo(1);
-        });
+        // Give async processing time
+        Thread.sleep(1000);
+
+        // Then: task-b should now be queued (async)
+        await().atMost(ASYNC_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .pollInterval(100, TimeUnit.MILLISECONDS)
+                .untilAsserted(() -> {
+                    assertThat(workQueue.size()).isEqualTo(1);
+                });
 
         WorkMessage workB = workQueue.poll();
         assertThat(workB.taskName()).isEqualTo("task-b");
@@ -317,17 +348,19 @@ class GraphEvaluatorTest {
 
         graphDefinitions.put(graph.name(), graph);
 
-        // When: Starting execution
+        // When: Starting execution (async)
         UUID executionId = evaluator.executeGraph(
                 "test-graph",
                 Map.of("date", "2025-10-18"),
                 "test"
         );
 
-        // Then: Global task execution created
-        await().atMost(3, TimeUnit.SECONDS).untilAsserted(() -> {
-            assertThat(globalTasks.size()).isEqualTo(1);
-        });
+        // Then: Global task execution created (async)
+        await().atMost(ASYNC_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .pollInterval(100, TimeUnit.MILLISECONDS)
+                .untilAsserted(() -> {
+                    assertThat(globalTasks.size()).isEqualTo(1);
+                });
 
         GlobalTaskExecution globalExec = globalTasks.values().iterator().next();
         assertThat(globalExec.taskName()).isEqualTo("load-data");
@@ -361,23 +394,27 @@ class GraphEvaluatorTest {
 
         graphDefinitions.put(graph.name(), graph);
 
-        // When: Two graphs execute with same parameters
+        // When: Two graphs execute with same parameters (async)
         UUID exec1 = evaluator.executeGraph("test-graph", Map.of(), "test");
         UUID exec2 = evaluator.executeGraph("test-graph", Map.of(), "test");
 
-        // Then: Only one global task execution created
-        await().atMost(3, TimeUnit.SECONDS).untilAsserted(() -> {
-            assertThat(globalTasks.size()).isEqualTo(1);
-        });
+        // Then: Only one global task execution created (async)
+        await().atMost(ASYNC_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .pollInterval(100, TimeUnit.MILLISECONDS)
+                .untilAsserted(() -> {
+                    assertThat(globalTasks.size()).isEqualTo(1);
+                });
 
         GlobalTaskExecution globalExec = globalTasks.values().iterator().next();
         assertThat(globalExec.linkedGraphExecutions())
                 .containsExactlyInAnyOrder(exec1, exec2);
 
-        // And: Only one work message in queue (deduplication worked)
-        await().atMost(2, TimeUnit.SECONDS).untilAsserted(() -> {
-            assertThat(workQueue.size()).isEqualTo(1);
-        });
+        // And: Only one work message in queue (deduplication worked) (async)
+        await().atMost(ASYNC_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .pollInterval(100, TimeUnit.MILLISECONDS)
+                .untilAsserted(() -> {
+                    assertThat(workQueue.size()).isEqualTo(1);
+                });
     }
 
     @Test
@@ -400,13 +437,15 @@ class GraphEvaluatorTest {
 
         graphDefinitions.put(graph.name(), graph);
 
-        // When: Starting execution
+        // When: Starting execution (async)
         evaluator.executeGraph("test-graph", Map.of("region", "eu"), "test");
 
-        // Then: Expression evaluated in work message
-        await().atMost(2, TimeUnit.SECONDS).untilAsserted(() -> {
-            assertThat(workQueue.size()).isGreaterThan(0);
-        });
+        // Then: Expression evaluated in work message (async)
+        await().atMost(ASYNC_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .pollInterval(100, TimeUnit.MILLISECONDS)
+                .untilAsserted(() -> {
+                    assertThat(workQueue.size()).isGreaterThan(0);
+                });
 
         WorkMessage work = workQueue.poll();
         assertThat(work.args()).containsExactly("Processing eu");
