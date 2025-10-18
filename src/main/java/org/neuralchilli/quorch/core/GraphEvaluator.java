@@ -99,6 +99,14 @@ public class GraphEvaluator {
         // Create task executions for all tasks in graph
         createTaskExecutions(execution, graph);
 
+        // CRITICAL FOR TESTS: Ensure all Hazelcast writes are visible before evaluation
+        if (testMode) {
+            log.debug("Test mode: flushing all state before evaluation");
+            graphExecutions.flush();
+            taskExecutions.flush();
+            taskExecutionIndex.flush();
+        }
+
         // Trigger initial evaluation - synchronous in test mode, async in production
         log.info("Triggering evaluation for graph: {}", execution.id());
         triggerEvaluation(execution.id());
@@ -127,9 +135,11 @@ public class GraphEvaluator {
 
     /**
      * Create task execution records for all tasks in the graph.
-     * Initializes all tasks as PENDING.
+     * Initializes all tasks as PENDING and ensures index is populated.
      */
     private void createTaskExecutions(GraphExecution graphExec, Graph graph) {
+        log.debug("Creating task executions for graph: {}", graphExec.id());
+
         for (TaskReference taskRef : graph.tasks()) {
             String taskName = taskRef.getEffectiveName();
             boolean isGlobal = taskRef.isGlobalReference();
@@ -147,16 +157,19 @@ public class GraphEvaluator {
                     globalKey
             );
 
+            // Store task execution
             taskExecutions.put(taskExec.id(), taskExec);
 
-            // Index for fast lookup
+            // CRITICAL: Update index for O(1) lookup
             TaskExecutionLookupKey lookupKey = new TaskExecutionLookupKey(
                     graphExec.id(), taskName);
             taskExecutionIndex.put(lookupKey, taskExec.id());
 
-            log.debug("Created task execution: {} for task: {} (global: {})",
+            log.debug("Created task execution: {} for task: {} (global: {}) - indexed",
                     taskExec.id(), taskName, isGlobal);
         }
+
+        log.debug("Created {} task executions for graph: {}", graph.tasks().size(), graphExec.id());
     }
 
     /**
@@ -391,13 +404,18 @@ public class GraphEvaluator {
                 TaskExecution taskExec = taskExecutions.get(taskExecId);
                 if (taskExec != null) {
                     states.put(node, taskExec.status());
+                    log.trace("Task {} status: {}", node.taskName(), taskExec.status());
                     continue;
+                } else {
+                    log.warn("Index points to non-existent task execution: {} for task: {}",
+                            taskExecId, node.taskName());
                 }
+            } else {
+                log.warn("Task execution not found in index for: {} in graph: {}",
+                        node.taskName(), graphExecutionId);
             }
 
             // Fallback to PENDING if not found
-            log.warn("Task execution not found in index for: {} in graph: {}",
-                    node.taskName(), graphExecutionId);
             states.put(node, TaskStatus.PENDING);
         }
 
@@ -406,9 +424,12 @@ public class GraphEvaluator {
 
     /**
      * Schedule a task node for execution.
+     * Handles both global and regular tasks.
      */
     private void scheduleTaskNode(TaskNode taskNode, GraphExecution graphExec, Graph graph) {
         String taskName = taskNode.taskName();
+
+        log.debug("Scheduling task node: {} for graph: {}", taskName, graphExec.id());
 
         if (taskNode.isGlobal()) {
             scheduleGlobalTask(taskName, graphExec, graph);
@@ -423,10 +444,18 @@ public class GraphEvaluator {
     private void scheduleRegularTask(String taskName, GraphExecution graphExec, Graph graph) {
         log.debug("Scheduling regular task: {} for graph: {}", taskName, graphExec.id());
 
-        // Find task execution (optimized lookup)
+        // Find task execution using optimized lookup
         TaskExecution taskExec = findTaskExecutionOptimized(graphExec.id(), taskName);
+
         if (taskExec == null) {
             log.error("Task execution not found: {} in graph: {}", taskName, graphExec.id());
+
+            // DEBUG: Log what's in the index
+            log.error("Index contents for graph {}:", graphExec.id());
+            taskExecutionIndex.keySet().stream()
+                    .filter(key -> key.graphExecutionId().equals(graphExec.id()))
+                    .forEach(key -> log.error("  Found indexed task: {}", key.taskName()));
+
             return;
         }
 
@@ -723,7 +752,15 @@ public class GraphEvaluator {
         UUID taskExecId = taskExecutionIndex.get(lookupKey);
 
         if (taskExecId != null) {
-            return taskExecutions.get(taskExecId);
+            TaskExecution taskExec = taskExecutions.get(taskExecId);
+            if (taskExec != null) {
+                return taskExec;
+            } else {
+                log.warn("Index contains ID {} for task {} but task execution not found in map",
+                        taskExecId, taskName);
+            }
+        } else {
+            log.warn("No index entry found for graph {} task {}", graphExecutionId, taskName);
         }
 
         return null;
