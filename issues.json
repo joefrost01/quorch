@@ -20,7 +20,8 @@
   {
     "title": "Core: Graph and Task Loader with Hot Reload",
     "body": "## Overview\nImplement loading of YAML configurations from filesystem with hot reload in dev mode.\n\n## Tasks\n- [ ] Create `GraphLoader` service\n- [ ] Implement loading from `orchestrator.config.graphs` directory\n- [ ] Implement loading from `orchestrator.config.tasks` directory\n- [ ] Store definitions in Hazelcast maps: `graph-definitions`, `task-definitions`\n- [ ] Create `ConfigWatcher` for dev mode (using WatchService)\n- [ ] Implement hot reload on file changes\n- [ ] Add validation on load with clear error reporting\n- [ ] Log loaded graphs and tasks on startup\n\n## Acceptance Criteria\n- All YAML files loaded on startup\n- Invalid files produce clear errors without stopping startup\n- In dev mode, file changes trigger reload within 1 second\n- Logs show which files were loaded/reloaded\n\n## Labels\ncore, priority:high, phase:foundation",
-    "labels": ["core", "priority:high", "phase:foundation"]
+    "labels": ["core", "priority:high", "phase:foundation"],
+    "status": "in progress"
   },
   {
     "title": "Core: Hazelcast Configuration and State Management",
