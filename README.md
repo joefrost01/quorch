@@ -1,3 +1,6 @@
+[![CI Pipeline](https://github.com/joefrost01/quorch/actions/workflows/build.yml/badge.svg)](https://github.com/joefrost01/quorch/actions/workflows/build.yml)
+[![Quarto Docs](https://img.shields.io/badge/docs-online-blue.svg)](https://joefrost01.github.io/quorch/)
+
 # Quorch
 
 **A lightweight, portable, event-driven workflow orchestrator that gets out of your way.**
