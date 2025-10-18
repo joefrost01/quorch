@@ -2,12 +2,14 @@
   {
     "title": "Setup: Project Structure and Base Configuration",
     "body": "## Overview\nInitialize the project structure with proper package organization and base configuration files.\n\n## Tasks\n- [ ] Create package structure: `config`, `core`, `domain`, `web`, `worker`, `storage`\n- [ ] Setup application.yml with dev profile configuration\n- [ ] Configure Quarkus extensions for REST, Qute, Hazelcast, etc.\n- [ ] Add logging configuration (text for dev, json for prod)\n- [ ] Create basic health check endpoints\n- [ ] Setup project README with architecture overview\n\n## Acceptance Criteria\n- Project builds successfully with `./mvnw clean package`\n- Health endpoints accessible at `/q/health/live` and `/q/health/ready`\n- Application starts in dev mode with `./mvnw quarkus:dev`\n\n## Labels\nsetup, priority:high, phase:foundation",
-    "labels": ["setup", "priority:high", "phase:foundation"]
+    "labels": ["setup", "priority:high", "phase:foundation"],
+    "status": "complete"
   },
   {
     "title": "Core: YAML Schema Definitions and Parser",
     "body": "## Overview\nImplement YAML schema definitions for tasks and graphs with validation.\n\n## Tasks\n- [ ] Create `Task` record with all properties (name, command, args, env, timeout, retry, global, key, params)\n- [ ] Create `Graph` record with all properties (name, description, params, env, schedule, tasks)\n- [ ] Create `Parameter` record with type, default, required, description\n- [ ] Implement YAML parser using SnakeYAML\n- [ ] Implement schema validator with proper error messages\n- [ ] Add validation for:\n  - Task name pattern: `^[a-z0-9-]+$`\n  - Graph name pattern: `^[a-z0-9-]+$`\n  - Global tasks must have `key` and `params`\n  - Circular dependency detection\n  - Parameter type validation\n\n## Acceptance Criteria\n- Can parse valid YAML files into domain objects\n- Invalid YAML produces clear validation errors\n- Unit tests cover all validation scenarios\n\n## Labels\ncore, priority:high, phase:foundation",
-    "labels": ["core", "priority:high", "phase:foundation"]
+    "labels": ["core", "priority:high", "phase:foundation"],
+    "status": "complete"
   },
   {
     "title": "Core: JEXL Expression Evaluator",
@@ -32,7 +34,8 @@
   {
     "title": "Core: Domain Model - Executions and State",
     "body": "## Overview\nDefine domain models for execution state and lifecycle.\n\n## Tasks\n- [ ] Create `GraphExecution` record:\n  - id, graphName, params, status, triggeredBy, startedAt, completedAt, error\n- [ ] Create `TaskExecution` record:\n  - id, graphExecutionId, taskName, status, workerId, threadName, startedAt, completedAt, duration, result, error, attempt\n- [ ] Create `GlobalTaskExecution` record:\n  - id, taskName, resolvedKey, params, status, linkedGraphExecutions, startedAt, completedAt, result\n- [ ] Create `Worker` record:\n  - id, threads, activeThreads, lastHeartbeat, status\n- [ ] Define enums: `GraphStatus`, `TaskStatus`, `WorkerStatus`\n- [ ] Implement state transition validation\n\n## Acceptance Criteria\n- All records properly serializable\n- State transitions validated\n- Status enums cover all states from design\n\n## Labels\ncore, priority:high, phase:foundation",
-    "labels": ["core", "priority:high", "phase:foundation"]
+    "labels": ["core", "priority:high", "phase:foundation"],
+    "status": "in progress"
   },
   {
     "title": "Core: Graph Evaluator - Execution Engine",
