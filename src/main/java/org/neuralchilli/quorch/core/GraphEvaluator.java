@@ -140,6 +140,10 @@ public class GraphEvaluator {
     private void createTaskExecutions(GraphExecution graphExec, Graph graph) {
         log.debug("Creating task executions for graph: {}", graphExec.id());
 
+        // Batch collections for efficient updates
+        Map<UUID, TaskExecution> taskExecutionBatch = new HashMap<>();
+        Map<TaskExecutionLookupKey, UUID> indexBatch = new HashMap<>();
+
         for (TaskReference taskRef : graph.tasks()) {
             String taskName = taskRef.getEffectiveName();
             boolean isGlobal = taskRef.isGlobalReference();
@@ -157,16 +161,40 @@ public class GraphEvaluator {
                     globalKey
             );
 
-            // Store task execution
-            taskExecutions.put(taskExec.id(), taskExec);
+            // Add to batch
+            taskExecutionBatch.put(taskExec.id(), taskExec);
 
-            // CRITICAL: Update index for O(1) lookup
+            // CRITICAL: Add to index batch
             TaskExecutionLookupKey lookupKey = new TaskExecutionLookupKey(
                     graphExec.id(), taskName);
-            taskExecutionIndex.put(lookupKey, taskExec.id());
+            indexBatch.put(lookupKey, taskExec.id());
 
-            log.debug("Created task execution: {} for task: {} (global: {}) - indexed",
+            log.debug("Prepared task execution: {} for task: {} (global: {})",
                     taskExec.id(), taskName, isGlobal);
+        }
+
+        // CRITICAL: Write both maps in sequence, then flush in test mode
+        log.debug("Writing {} task executions to Hazelcast", taskExecutionBatch.size());
+        taskExecutions.putAll(taskExecutionBatch);
+
+        log.debug("Writing {} index entries to Hazelcast", indexBatch.size());
+        taskExecutionIndex.putAll(indexBatch);
+
+        // CRITICAL FOR TESTS: Ensure all writes are immediately visible
+        if (testMode) {
+            log.debug("Test mode: flushing task executions and index");
+            taskExecutions.flush();
+            taskExecutionIndex.flush();
+
+            // Verify index was populated (debug only)
+            for (TaskExecutionLookupKey key : indexBatch.keySet()) {
+                UUID verifyId = taskExecutionIndex.get(key);
+                if (verifyId == null) {
+                    log.error("CRITICAL: Index entry not found after flush: {}", key);
+                } else {
+                    log.trace("Verified index entry: {} -> {}", key.taskName(), verifyId);
+                }
+            }
         }
 
         log.debug("Created {} task executions for graph: {}", graph.tasks().size(), graphExec.id());
