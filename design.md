@@ -1,2072 +1,1168 @@
-## Deployment
-
-### Database Migrations
-
-**Flyway Configuration**:
-
-```properties
-# application.properties
-quarkus.flyway.migrate-at-start=true
-quarkus.flyway.locations=classpath:db/migration
-```
-
-**Migration Files**:
-
-```sql
--- V1__initial_schema.sql
-CREATE TABLE graphs (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name VARCHAR(255) UNIQUE NOT NULL,
-    description TEXT,
-    yaml_content TEXT NOT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    CONSTRAINT graphs_name_format CHECK (name ~ '^[a-z0-9-]+# GKE Event-Driven Orchestrator Design Document
+# Event-Driven Workflow Orchestrator - Design Document
 
 ## Table of Contents
 1. [Overview](#overview)
 2. [Architecture](#architecture)
-3. [Data Model](#data-model)
+3. [Core Concepts](#core-concepts)
 4. [Configuration Schema](#configuration-schema)
-5. [Core Components](#core-components)
-6. [Interfaces and Abstractions](#interfaces-and-abstractions)
-7. [Environment Profiles](#environment-profiles)
-8. [Deployment](#deployment)
-9. [Development Workflow](#development-workflow)
-10. [Testing Strategy](#testing-strategy)
-11. [Implementation Phases](#implementation-phases)
+5. [Expression Language](#expression-language)
+6. [Global Tasks](#global-tasks)
+7. [Parameter Scoping](#parameter-scoping)
+8. [Development Mode](#development-mode)
+9. [Production Deployment](#production-deployment)
+10. [UI Design](#ui-design)
+11. [Data Model](#data-model)
+12. [Implementation Details](#implementation-details)
+13. [Testing Strategy](#testing-strategy)
+14. [Deployment Guide](#deployment-guide)
+
+---
 
 ## Overview
 
-### Purpose
-Build a Quarkus-based workflow orchestrator running on Google Kubernetes Engine (GKE) that enables event-driven execution of data pipeline tasks. The system provides visualization of workflow state similar to Apache Airflow, with a focus on simplicity and developer experience.
+### Project Vision
 
-### Key Requirements
-- Event-driven architecture using Pub/Sub for task coordination
-- SSR-based UI for workflow visualization (no React)
-- Worker pods that pull tasks from queues
-- Support for DBT, BigQuery Extract, Dataplex, and Dataflow tasks
-- Management topic for worker lifecycle commands
-- Worker heartbeat mechanism with automatic work recovery
-- State persistence in Cloud SQL (Postgres)
-- Graph evaluation only on event arrival (not polling)
-- JGraphT for DAG management
-- Support for global tasks (shared across multiple graphs)
-- Repository pattern for database abstraction
-- Queue abstraction for local development
+A lightweight, portable, event-driven workflow orchestrator that **gets out of your way**. Designed for data teams who want to ship fast without operational overhead.
 
-### Technology Stack
-- **Framework**: Quarkus with Vert.x event bus
-- **Graph Library**: JGraphT
-- **Database**: Cloud SQL Postgres (production), H2 (local dev)
-- **Messaging**: Google Cloud Pub/Sub (production), Hazelcast (local dev)
-- **Container Orchestration**: GKE with HPA
-- **UI**: Qute templates (SSR)
-- **Language**: Java 21+
+**Core Philosophy**:
+- Simple over complex
+- Portable over locked-in
+- YAML over code
+- Files over databases (for events)
+- Commands over plugins
+
+### Key Differentiators
+
+1. **Global Task Deduplication** - Run once, notify many graphs
+2. **Single Binary** - No dependencies, runs anywhere
+3. **File-Based Events** - JSONL files, not databases
+4. **Multi-Threaded Workers** - Efficient for I/O-bound tasks
+5. **Dev Mode** - Single process with embedded worker
+6. **Trial Run** - See what would execute without executing
+
+### Target Users
+
+- Data engineering teams (5-50 people)
+- Organizations with multi-cloud or hybrid deployments
+- Teams that value simplicity and portability
+- Cost-conscious organizations
+- Edge computing scenarios
+
+### Not For
+
+- FAANG-scale (millions of tasks/day)
+- Teams that need complex multi-tenancy
+- Microservice orchestration (use Temporal)
+- Teams deeply invested in Airflow ecosystem
+
+---
 
 ## Architecture
 
-### System Context Diagram
+### High-Level Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         GKE Cluster                             │
-│                                                                 │
-│  ┌────────────────────┐           ┌─────────────────────────┐   │
-│  │   Orchestrator     │           │   Worker Pods (HPA)     │   │
-│  │    (Quarkus)       │           │                         │   │
-│  │                    │           │  ┌────────┐ ┌────────┐  │   │
-│  │  - Graph Loader    │           │  │Worker 1│ │Worker 2│  │   │
-│  │  - Event Consumer  │           │  │        │ │        │  │   │
-│  │  - Graph Evaluator │           │  └────────┘ └────────┘  │   │
-│  │  - Worker Monitor  │           │         ...             │   │
-│  │  - UI (SSR)        │           │                         │   │
-│  │  - REST API        │           │  Each worker:           │   │
-│  │                    │           │  - Pulls from queue     │   │
-│  └────────────────────┘           │  - Executes tasks       │   │
-│           │                       │  - Sends heartbeats     │   │
-│           │                       │  - Publishes results    │   │
-│           │                       └─────────────────────────┘   │
-└───────────┼─────────────────────────────────────────────────────┘
-            │
-    ┌───────┴────────┐
-    ▼                ▼
-┌─────────┐    ┌──────────────┐      ┌──────────────────┐
-│Cloud SQL│    │  Pub/Sub     │      │  Config Files    │
-│Postgres │    │              │      │  (ConfigMap)     │
-│         │    │ ┌──────────┐ │      │                  │
-│State &  │    │ │Task Queue│ │      │  graphs/*.yaml   │
-│Metadata │    │ └──────────┘ │      │  tasks/*.yaml    │
-└─────────┘    │ ┌──────────┐ │      └──────────────────┘
-               │ │Management│ │
-               │ │  Topic   │ │
-               │ └──────────┘ │
-               │ ┌──────────┐ │
-               │ │  Events  │ │
-               │ │  Topic   │ │
-               │ └──────────┘ │
-               └──────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                    Orchestrator Process                     │
+│                                                             │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │              Core Orchestration                        │ │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌─────────────┐   │ │
+│  │  │Graph Loader  │  │Event Bus     │  │Graph        │   │ │
+│  │  │(YAML→Memory) │  │(Vert.x)      │  │Evaluator    │   │ │
+│  │  └──────────────┘  └──────────────┘  └─────────────┘   │ │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌─────────────┐   │ │
+│  │  │State Manager │  │Worker Monitor│  │Task Queue   │   │ │
+│  │  │(Hazelcast)   │  │              │  │Publisher    │   │ │
+│  │  └──────────────┘  └──────────────┘  └─────────────┘   │ │
+│  └────────────────────────────────────────────────────────┘ │
+│                                                             │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │              Worker Pool (Embedded in Dev)             │ │
+│  │  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐    │ │
+│  │  │Thread 1 │  │Thread 2 │  │Thread 3 │  │Thread 4 │    │ │
+│  │  └─────────┘  └─────────┘  └─────────┘  └─────────┘    │ │
+│  └────────────────────────────────────────────────────────┘ │
+│                                                             │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │                    Web UI (SSR)                        │ │
+│  │  ┌──────────────────────────────────────────────────┐  │ │
+│  │  │  Qute Templates + Tabler CSS + Monaco Editor     │  │ │
+│  │  └──────────────────────────────────────────────────┘  │ │
+│  └────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                ┌─────────────┴─────────────┐
+                ↓                           ↓
+        ┌──────────────┐          ┌──────────────────┐
+        │ Event Store  │          │  Config Files    │
+        │ (JSONL)      │          │  (YAML)          │
+        │              │          │                  │
+        │ Local: files │          │  graphs/*.yaml   │
+        │ Prod: GCS/S3 │          │  tasks/*.yaml    │
+        └──────────────┘          └──────────────────┘
 ```
 
-### Component Interaction Flow
-
-#### Graph Evaluation Flow
-```
-1. External Event arrives (task completed/failed)
-   ↓
-2. ExternalEventConsumer bridges to internal event bus
-   ↓
-3. GraphEvaluator receives internal event
-   ↓
-4. Update task status in repository
-   ↓
-5. If global task → find all affected graphs
-   ↓
-6. Build DAG using JGraphT
-   ↓
-7. Determine ready tasks (all dependencies met)
-   ↓
-8. For each ready task:
-   - Create TaskExecution record
-   - Publish "task.ready" event
-     ↓
-9. TaskQueuePublisher receives "task.ready"
-   ↓
-10. Publish WorkMessage to queue (Pub/Sub or Hazelcast)
-    ↓
-11. Worker pulls message
-    ↓
-12. Worker executes task
-    ↓
-13. Worker publishes result to events topic
-    ↓
-14. Loop back to step 1
-```
-
-#### Worker Lifecycle Flow
-```
-1. Worker pod starts
-   ↓
-2. Worker sends registration message to management topic
-   ↓
-3. WorkerMonitor creates worker record
-   ↓
-4. Worker starts heartbeat timer (every 10s)
-   ↓
-5. WorkerMonitor checks heartbeats (every 30s)
-   ↓
-6. If no heartbeat for 60s:
-   - Mark worker as dead
-   - Publish "worker.died" event
-     ↓
-7. WorkRecoveryService receives "worker.died"
-   ↓
-8. Find all assigned work for dead worker
-   ↓
-9. For each orphaned task:
-   - If retries remaining → publish "task.retry"
-   - Else → mark as failed
-     ↓
-10. GraphEvaluator re-evaluates affected graphs
-```
-
-## Data Model
-
-### Database Schema
-
-All timestamps are stored in UTC. The schema uses UUID for primary keys to avoid conflicts in distributed systems.
-
-#### Tables
-
-##### `graphs`
-Stores graph definitions loaded from YAML configuration files.
-
-```sql
-CREATE TABLE graphs (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name VARCHAR(255) UNIQUE NOT NULL,
-    description TEXT,
-    yaml_content TEXT NOT NULL,  -- Original YAML for reference/debugging
-    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    CONSTRAINT graphs_name_format CHECK (name ~ '^[a-z0-9-]+$')
-);
-
-CREATE INDEX idx_graphs_name ON graphs(name);
-```
-
-##### `tasks`
-Task definitions, both global (shared across graphs) and graph-specific.
-
-```sql
-CREATE TABLE tasks (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name VARCHAR(255) UNIQUE NOT NULL,
-    type VARCHAR(50) NOT NULL,  -- 'dbt', 'bq_extract', 'dataplex', 'dataflow'
-    config JSONB NOT NULL,
-    retry_policy JSONB NOT NULL DEFAULT '{"max_retries": 3, "backoff": "exponential", "initial_delay_seconds": 30}'::jsonb,
-    timeout_seconds INT NOT NULL DEFAULT 3600,
-    is_global BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    CONSTRAINT tasks_name_format CHECK (name ~ '^[a-z0-9-]+$'),
-    CONSTRAINT tasks_type_valid CHECK (type IN ('dbt', 'bq_extract', 'dataplex', 'dataflow')),
-    CONSTRAINT tasks_timeout_positive CHECK (timeout_seconds > 0)
-);
-
-CREATE INDEX idx_tasks_name ON tasks(name);
-CREATE INDEX idx_tasks_global ON tasks(name) WHERE is_global = TRUE;
-CREATE INDEX idx_tasks_type ON tasks(type);
-```
-
-##### `graph_edges`
-Defines the DAG structure within each graph (task dependencies).
-
-```sql
-CREATE TABLE graph_edges (
-    graph_id UUID NOT NULL REFERENCES graphs(id) ON DELETE CASCADE,
-    from_task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    to_task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (graph_id, from_task_id, to_task_id),
-    CONSTRAINT graph_edges_no_self_reference CHECK (from_task_id != to_task_id)
-);
-
-CREATE INDEX idx_graph_edges_graph ON graph_edges(graph_id);
-CREATE INDEX idx_graph_edges_from ON graph_edges(from_task_id);
-CREATE INDEX idx_graph_edges_to ON graph_edges(to_task_id);
-```
-
-##### `graph_executions`
-Tracks execution instances of graphs.
-
-```sql
-CREATE TABLE graph_executions (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    graph_id UUID NOT NULL REFERENCES graphs(id) ON DELETE CASCADE,
-    status VARCHAR(20) NOT NULL DEFAULT 'running',
-    started_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    completed_at TIMESTAMP,
-    triggered_by VARCHAR(255) NOT NULL,  -- Event ID or system trigger
-    error_message TEXT,
-    CONSTRAINT graph_executions_status_valid CHECK (
-        status IN ('running', 'completed', 'failed', 'stalled')
-    ),
-    CONSTRAINT graph_executions_completed_when_done CHECK (
-        (status IN ('completed', 'failed') AND completed_at IS NOT NULL) OR
-        (status IN ('running', 'stalled') AND completed_at IS NULL)
-    )
-);
-
-CREATE INDEX idx_graph_executions_graph ON graph_executions(graph_id);
-CREATE INDEX idx_graph_executions_status ON graph_executions(status);
-CREATE INDEX idx_graph_executions_started ON graph_executions(started_at DESC);
-```
-
-##### `task_executions`
-Tracks individual task executions within graph executions.
-
-```sql
-CREATE TABLE task_executions (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    graph_execution_id UUID NOT NULL REFERENCES graph_executions(id) ON DELETE CASCADE,
-    task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    status VARCHAR(20) NOT NULL DEFAULT 'pending',
-    attempt INT NOT NULL DEFAULT 0,
-    assigned_worker_id VARCHAR(255),
-    queued_at TIMESTAMP,
-    started_at TIMESTAMP,
-    completed_at TIMESTAMP,
-    error_message TEXT,
-    result JSONB,
-    -- For global tasks: link to the canonical execution
-    global_execution_id UUID REFERENCES task_executions(id),
-    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    CONSTRAINT task_executions_unique_per_graph UNIQUE(graph_execution_id, task_id),
-    CONSTRAINT task_executions_status_valid CHECK (
-        status IN ('pending', 'queued', 'running', 'completed', 'failed', 'skipped')
-    ),
-    CONSTRAINT task_executions_attempt_positive CHECK (attempt >= 0),
-    CONSTRAINT task_executions_timestamps_ordered CHECK (
-        (queued_at IS NULL OR started_at IS NULL OR queued_at <= started_at) AND
-        (started_at IS NULL OR completed_at IS NULL OR started_at <= completed_at)
-    )
-);
-
-CREATE INDEX idx_task_executions_graph ON task_executions(graph_execution_id);
-CREATE INDEX idx_task_executions_task ON task_executions(task_id);
-CREATE INDEX idx_task_executions_status ON task_executions(status);
-CREATE INDEX idx_task_executions_worker ON task_executions(assigned_worker_id) 
-    WHERE assigned_worker_id IS NOT NULL;
-CREATE INDEX idx_task_executions_global ON task_executions(global_execution_id) 
-    WHERE global_execution_id IS NOT NULL;
-CREATE INDEX idx_task_executions_running_global ON task_executions(task_id) 
-    WHERE status = 'running' AND global_execution_id IS NULL;
-```
-
-##### `workers`
-Registry of active and dead workers.
-
-```sql
-CREATE TABLE workers (
-    id VARCHAR(255) PRIMARY KEY,  -- Kubernetes pod name
-    status VARCHAR(20) NOT NULL DEFAULT 'active',
-    last_heartbeat TIMESTAMP NOT NULL DEFAULT NOW(),
-    registered_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    capabilities JSONB NOT NULL DEFAULT '{}'::jsonb,  -- For future heterogeneous workers
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,  -- Pod IP, node name, etc.
-    CONSTRAINT workers_status_valid CHECK (status IN ('active', 'dead'))
-);
-
-CREATE INDEX idx_workers_status ON workers(status);
-CREATE INDEX idx_workers_heartbeat ON workers(last_heartbeat) WHERE status = 'active';
-```
-
-##### `work_assignments`
-Tracks which worker is assigned to which task (for failure recovery).
-
-```sql
-CREATE TABLE work_assignments (
-    task_execution_id UUID PRIMARY KEY REFERENCES task_executions(id) ON DELETE CASCADE,
-    worker_id VARCHAR(255) NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
-    assigned_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    heartbeat_deadline TIMESTAMP NOT NULL,
-    CONSTRAINT work_assignments_deadline_future CHECK (heartbeat_deadline > assigned_at)
-);
-
-CREATE INDEX idx_work_assignments_worker ON work_assignments(worker_id);
-CREATE INDEX idx_work_assignments_deadline ON work_assignments(heartbeat_deadline);
-```
-
-### Entity Relationships
+### Production Architecture (GKE)
 
 ```
-graphs 1──────* graph_edges *──────1 tasks
-  │                                    │
-  │                                    │
-  │ 1                                  │ 1
-  │                                    │
-  * graph_executions                   * task_executions
-        │                                    │
-        │ 1                                  │ *
-        │                                    │
-        *────────────────────────────────────*
-                                             │
-                                             │ 1
-                                             │
-                                             * work_assignments * ────1 workers
+┌─────────────────────────────────────────────────────────────┐
+│                         GKE Cluster                         │
+│                                                             │
+│  ┌──────────────────┐         ┌─────────────────────────┐   │
+│  │   Orchestrator   │         │   Worker Pods (HPA)     │   │
+│  │    (1 replica)   │         │                         │   │
+│  │                  │         │  ┌────────┐ ┌────────┐  │   │
+│  │  - Graph Eval    │         │  │Worker 1│ │Worker 2│  │   │
+│  │  - State Mgmt    │         │  │16 thrd │ │16 thrd │  │   │
+│  │  - UI (SSR)      │         │  └────────┘ └────────┘  │   │
+│  │  - API           │         │       ...               │   │
+│  └──────────────────┘         └─────────────────────────┘   │
+│         │                                                   │
+└─────────┼───────────────────────────────────────────────────┘
+          │
+    ┌─────┴─────┐
+    ▼           ▼
+┌────────┐  ┌────────────┐      ┌──────────────┐
+│Hazel-  │  │  GCS/S3    │      │ ConfigMap    │
+│cast    │  │            │      │              │
+│Cluster │  │ Events:    │      │ graphs/*.yaml│
+│(3 AZs) │  │ *.jsonl    │      │ tasks/*.yaml │
+└────────┘  └────────────┘      └──────────────┘
 ```
 
-### Enums and Constants
+---
 
-```java
-public enum TaskType {
-    DBT("dbt"),
-    BQ_EXTRACT("bq_extract"),
-    DATAPLEX("dataplex"),
-    DATAFLOW("dataflow");
-    
-    private final String value;
-}
+## Core Concepts
 
-public enum TaskStatus {
-    PENDING,    // Created but not yet queued
-    QUEUED,     // Published to queue
-    RUNNING,    // Worker is executing
-    COMPLETED,  // Successfully finished
-    FAILED,     // Failed (may retry)
-    SKIPPED     // Skipped due to upstream failure
-}
+### 1. Tasks
 
-public enum GraphStatus {
-    RUNNING,    // In progress
-    COMPLETED,  // All tasks completed
-    FAILED,     // One or more tasks failed permanently
-    STALLED     // No tasks can make progress
-}
+**Definition**: A single unit of work. Just a command to execute.
 
-public enum WorkerStatus {
-    ACTIVE,     // Receiving heartbeats
-    DEAD        // No heartbeat for >60s
-}
+**Key Properties**:
+- `name` - Unique identifier
+- `command` - Program to execute
+- `args` - Command arguments (with JEXL expressions)
+- `env` - Environment variables
+- `timeout` - Maximum execution time
+- `retry` - Retry policy
 
-public class Constants {
-    public static final int WORKER_HEARTBEAT_INTERVAL_SECONDS = 10;
-    public static final int WORKER_DEAD_THRESHOLD_SECONDS = 60;
-    public static final int WORKER_MONITOR_CHECK_INTERVAL_SECONDS = 30;
-    public static final String CONFIG_PATH = "/config";
-    public static final String GRAPHS_PATTERN = "graphs/*.yaml";
-    public static final String TASKS_PATTERN = "tasks/*.yaml";
-}
+**Example**:
+```yaml
+name: extract-data
+command: python
+args:
+  - /scripts/extract.py
+  - --date
+  - "${params.batch_date}"
+env:
+  PYTHONUNBUFFERED: "1"
+  API_KEY: "${env.API_KEY}"
+timeout: 600  # 10 minutes
+retry: 3
 ```
+
+### 2. Global Tasks
+
+**Definition**: Tasks that can be shared across multiple graphs. Run once per unique parameter set.
+
+**Key Feature**: Deduplication via parameterized keys.
+
+**Key Properties**:
+- `global: true` - Marks as global
+- `key` - Expression that uniquely identifies this task instance
+- `params` - Parameters with defaults
+
+**Example**:
+```yaml
+name: load-market-data
+global: true
+key: "load_market_${params.batch_date}_${params.region}"
+
+params:
+  batch_date:
+    type: string
+    required: true
+  region:
+    type: string
+    default: us
+
+command: dbt
+args:
+  - run
+  - --models
+  - +market_data
+  - --vars
+  - "batch_date:${params.batch_date},region:${params.region}"
+```
+
+**Behavior**:
+- Graph A needs `load-market-data[2025-10-17, us]`
+- Graph B needs `load-market-data[2025-10-17, us]`
+- Task runs **once**, both graphs notified on completion
+- Graph C needs `load-market-data[2025-10-16, us]`
+- Different key → runs separately
+
+### 3. Graphs
+
+**Definition**: A directed acyclic graph (DAG) of tasks with dependencies.
+
+**Key Properties**:
+- `name` - Unique identifier
+- `params` - Parameters with defaults (can be overridden at runtime)
+- `env` - Graph-level environment variables
+- `tasks` - List of tasks (inline or references to global tasks)
+- `schedule` (optional) - Cron expression for scheduled execution
+
+**Example**:
+```yaml
+name: daily-etl
+description: Daily ETL pipeline
+
+params:
+  batch_date:
+    type: string
+    default: "${date.today()}"
+  region:
+    type: string
+    default: us
+
+env:
+  GCS_BUCKET: "gs://data-${params.region}"
+  PROCESSING_DATE: "${params.batch_date}"
+
+schedule: "0 2 * * *"  # 2 AM daily
+
+tasks:
+  # Reference global task
+  - task: load-market-data
+    params:
+      batch_date: "${params.batch_date}"
+      region: "${params.region}"
+  
+  # Inline task
+  - name: transform-data
+    command: python
+    args:
+      - /scripts/transform.py
+      - --input
+      - "${env.GCS_BUCKET}/raw/${params.batch_date}"
+    depends_on:
+      - load-market-data
+```
+
+### 4. Graph Executions
+
+**Definition**: A single run of a graph with specific parameters.
+
+**Lifecycle**:
+1. `RUNNING` - Graph is being evaluated/executed
+2. `COMPLETED` - All tasks completed successfully
+3. `FAILED` - One or more tasks failed permanently
+4. `STALLED` - No progress possible (waiting on failed dependencies)
+5. `PAUSED` - Manually paused by user
+
+### 5. Task Executions
+
+**Definition**: A single execution of a task within a graph execution.
+
+**Lifecycle**:
+1. `PENDING` - Task created, waiting for dependencies
+2. `QUEUED` - Published to worker queue
+3. `RUNNING` - Worker is executing
+4. `COMPLETED` - Successfully finished
+5. `FAILED` - Failed (may retry)
+6. `SKIPPED` - Skipped due to upstream failure
+
+### 6. Workers
+
+**Definition**: Processes that pull tasks from queue and execute them.
+
+**Types**:
+- **Embedded Worker** (dev mode) - Runs in same process as orchestrator
+- **Dedicated Workers** (prod) - Separate pods with multi-threaded execution
+
+**Key Properties**:
+- `worker_id` - Unique identifier (hostname/pod name)
+- `threads` - Number of concurrent task executions
+- `heartbeat` - Periodic health signal (every 10s)
+- `capabilities` - What tasks can run (future: heterogeneous workers)
+
+---
 
 ## Configuration Schema
 
-### Task Definition YAML
-
-Task definitions are reusable components that can be referenced by multiple graphs.
+### Task Definition Schema
 
 **Location**: `tasks/{task-name}.yaml`
 
-**Schema**:
 ```yaml
-# Unique task name (must match filename without .yaml extension)
-name: string                # Required. Pattern: ^[a-z0-9-]+$
+# Required: Task name (must match filename without .yaml)
+name: string  # Pattern: ^[a-z0-9-]+$
 
-# Task type determines which handler executes it
-type: enum                  # Required. One of: dbt, bq_extract, dataplex, dataflow
+# Optional: Mark as global task
+global: boolean  # Default: false
 
-# Is this task shared across multiple graphs?
-global: boolean             # Optional. Default: false
+# Required for global tasks: Unique key expression
+key: string  # JEXL expression with params
 
-# Retry configuration
-retry_policy:               # Optional
-  max_retries: integer      # Default: 3
-  backoff: enum             # Default: exponential. One of: exponential, linear, constant
-  initial_delay_seconds: integer  # Default: 30
-  max_delay_seconds: integer      # Optional. Default: 3600
+# Optional: Parameters (required for global tasks with key)
+params:
+  param_name:
+    type: string|integer|boolean|date|array  # Required
+    default: any  # Optional (JEXL expression allowed)
+    required: boolean  # Default: false
+    description: string  # Optional
 
-# Maximum execution time
-timeout_seconds: integer    # Optional. Default: 3600
+# Required: Command to execute
+command: string
 
-# Task-specific configuration (passed to task handler)
-config: object              # Required. Structure depends on task type
+# Required: Command arguments
+args:
+  - string  # JEXL expressions allowed
+
+# Optional: Environment variables
+env:
+  KEY: string  # JEXL expressions allowed
+
+# Optional: Timeout in seconds
+timeout: integer  # Default: 3600 (1 hour)
+
+# Optional: Retry policy
+retry: integer  # Default: 3 (max retry attempts)
 ```
 
-**Example - DBT Task**:
-```yaml
-# tasks/load-market-data.yaml
-name: load-market-data
-type: dbt
-global: true
-retry_policy:
-  max_retries: 3
-  backoff: exponential
-  initial_delay_seconds: 30
-timeout_seconds: 600
-config:
-  project: analytics
-  models: +market_data
-  vars:
-    region: us
-    refresh_mode: full
-  target: prod
-```
-
-**Example - BigQuery Extract Task**:
-```yaml
-# tasks/extract-prices.yaml
-name: extract-prices
-type: bq_extract
-timeout_seconds: 300
-config:
-  project: my-project
-  dataset: raw_data
-  table: prices
-  destination: gs://my-bucket/prices/*.parquet
-  format: parquet
-  compression: snappy
-```
-
-**Example - Dataplex Task**:
-```yaml
-# tasks/run-quality-checks.yaml
-name: run-quality-checks
-type: dataplex
-timeout_seconds: 1800
-config:
-  project: my-project
-  location: us-central1
-  lake: analytics-lake
-  zone: raw-zone
-  scan: market-data-quality
-  wait_for_completion: true
-```
-
-**Example - Dataflow Task**:
-```yaml
-# tasks/aggregate-metrics.yaml
-name: aggregate-metrics
-type: dataflow
-timeout_seconds: 3600
-retry_policy:
-  max_retries: 2
-  backoff: exponential
-config:
-  project: my-project
-  region: us-central1
-  template: gs://my-bucket/templates/aggregate-market-metrics
-  temp_location: gs://my-bucket/temp
-  parameters:
-    input: gs://my-bucket/prices/*.parquet
-    output: my-project:analytics.market_metrics
-    window_size: 1h
-```
-
-### Graph Definition YAML
-
-Graphs define workflows as DAGs of tasks.
+### Graph Definition Schema
 
 **Location**: `graphs/{graph-name}.yaml`
 
-**Schema**:
 ```yaml
-# Unique graph name (must match filename without .yaml extension)
-name: string                # Required. Pattern: ^[a-z0-9-]+$
+# Required: Graph name (must match filename without .yaml)
+name: string  # Pattern: ^[a-z0-9-]+$
 
-# Human-readable description (supports multi-line)
-description: string         # Optional
+# Optional: Human-readable description
+description: string
 
-# List of tasks in this graph
-tasks: array                # Required. At least one task
-  - # Option 1: Reference to existing task definition
-    task: string            # Task name from tasks/*.yaml
-    
-  - # Option 2: Inline task definition
-    name: string            # Required
-    type: enum              # Required
-    timeout_seconds: integer
-    retry_policy: object
-    config: object
-    depends_on: array       # Optional. List of task names this depends on
+# Optional: Parameters
+params:
+  param_name:
+    type: string|integer|boolean|date|array
+    default: any  # JEXL expression allowed
+    required: boolean  # Default: false
+    description: string
+
+# Optional: Graph-level environment variables
+env:
+  KEY: string  # JEXL expressions allowed
+
+# Optional: Schedule (cron expression)
+schedule: string  # e.g., "0 2 * * *"
+
+# Optional: Triggers
+triggers:
+  - type: webhook|pubsub|schedule
+    # Type-specific config
+
+# Required: Tasks
+tasks:
+  # Option 1: Reference global task
+  - task: string  # Global task name
+    params:  # Optional param overrides
+      param_name: any  # JEXL expression
+    depends_on:  # Optional
+      - string  # Task names
+  
+  # Option 2: Inline task definition
+  - name: string
+    command: string
+    args:
+      - string
+    env:
+      KEY: string
+    timeout: integer
+    retry: integer
+    depends_on:
       - string
 ```
 
-**Example - Market Pipeline**:
+### Orchestrator Configuration
+
+**Location**: `application.yaml` (or `application-{profile}.yaml`)
+
 ```yaml
-# graphs/market-pipeline.yaml
-name: market-pipeline
-description: |
-  Daily market data processing pipeline.
-  Runs after market close to process and aggregate trading data.
+orchestrator:
+  # Mode: dev or prod
+  mode: dev
   
-  Steps:
-  1. Load raw market data (DBT)
-  2. Extract prices to GCS (BigQuery)
-  3. Run data quality checks (Dataplex)
-  4. Aggregate metrics (Dataflow)
+  # Config paths
+  config:
+    graphs: ./graphs  # Directory containing graph YAML files
+    tasks: ./tasks    # Directory containing task YAML files
+    watch: true       # Watch for file changes (dev only)
+  
+  # Development mode settings
+  dev:
+    worker-threads: 4       # Embedded worker thread count
+    trial-run: false        # If true, only log commands instead of executing
+    enable-editor: true     # Enable web-based YAML editor
+  
+  # Storage
+  storage:
+    events: file://./data/events  # or gs://bucket/events or s3://bucket/events
+  
+  # Hazelcast
+  hazelcast:
+    embedded: true  # true for dev, false for prod
+    cluster-name: orchestrator
+    members:        # Prod only
+      - orchestrator-0.orchestrator
+      - orchestrator-1.orchestrator
+      - orchestrator-2.orchestrator
+  
+  # Worker settings (for dedicated workers)
+  worker:
+    threads: 16             # Threads per worker pod
+    heartbeat-interval: 10  # Seconds
+    dead-threshold: 60      # Seconds
+
+# Web server
+server:
+  port: 8080
+
+# Logging
+logging:
+  level: info
+  format: json  # or text
+```
+
+---
+
+## Expression Language
+
+### JEXL Overview
+
+We use Apache Commons JEXL 3 for all expressions. Expressions are wrapped in `${ }`.
+
+**Key Features**:
+- Arithmetic: `+`, `-`, `*`, `/`, `%`
+- Comparison: `==`, `!=`, `<`, `>`, `<=`, `>=`
+- Logical: `&&`, `||`, `!`
+- Ternary: `condition ? true_val : false_val`
+- Null-safe: `object?.property`
+- Elvis: `value ?: default`
+
+### Built-in Variables
+
+```
+${params.name}          - Access parameter
+${env.NAME}             - Access environment variable
+${task.taskname.result} - Access upstream task result (JSON)
+```
+
+### Built-in Functions
+
+#### Date Functions
+
+```
+${date.today()}                              → "2025-10-17"
+${date.now('yyyy-MM-dd HH:mm:ss')}          → "2025-10-17 14:30:00"
+${date.add(date.today(), 1, 'days')}        → "2025-10-18"
+${date.sub(date.today(), 7, 'days')}        → "2025-10-10"
+${date.format(params.date, 'yyyy/MM/dd')}   → "2025/10/17"
+```
+
+#### String Functions
+
+```
+${string.uuid()}                             → "550e8400-e29b-41d4-a716-446655440000"
+${string.slugify('My Workflow Name')}       → "my-workflow-name"
+```
+
+#### String Methods
+
+```
+${'hello'.toUpperCase()}                     → "HELLO"
+${'HELLO'.toLowerCase()}                     → "hello"
+${'2025-10-17'.replace('-', '_')}           → "2025_10_17"
+${'  text  '.trim()}                         → "text"
+```
+
+#### Math Functions
+
+```
+${Math.round(3.7)}                           → 4
+${Math.floor(3.7)}                           → 3
+${Math.ceil(3.2)}                            → 4
+${Math.max(10, 20)}                          → 20
+${Math.min(10, 20)}                          → 10
+```
+
+### Examples
+
+```yaml
+# Simple variable substitution
+command: echo
+args:
+  - "Processing ${params.region}"
+
+# Arithmetic
+env:
+  BATCH_SIZE: "${params.scale * 100}"
+  WORKER_COUNT: "${params.scale * 4}"
+
+# Conditionals
+args:
+  - "${params.full_refresh ? '--full-refresh' : '--incremental'}"
+
+# Complex logic
+env:
+  PARALLELISM: "${params.scale > 10 ? 32 : params.scale > 5 ? 16 : 4}"
+
+# String manipulation
+env:
+  TABLE_NAME: "${'data_' + params.region + '_' + params.date.replace('-', '_')}"
+
+# Null-safe access
+env:
+  API_KEY: "${params.config?.api?.key ?: env.DEFAULT_API_KEY}"
+
+# Date operations
+params:
+  yesterday:
+    default: "${date.add(date.today(), -1, 'days')}"
+
+# Reference upstream task output
+args:
+  - --row-count
+  - "${task.extract.result.row_count}"
+```
+
+---
+
+## Global Tasks
+
+### Concept
+
+Global tasks solve the problem of multiple graphs needing the same data/computation for the same parameters.
+
+**Without global tasks**:
+```
+Graph A: load-data[2025-10-17] → runs
+Graph B: load-data[2025-10-17] → runs (duplicate!)
+Graph C: load-data[2025-10-17] → runs (duplicate!)
+```
+
+**With global tasks**:
+```
+Graph A: load-data[2025-10-17] → starts execution
+Graph B: load-data[2025-10-17] → links to same execution
+Graph C: load-data[2025-10-17] → links to same execution
+→ Runs once, all three graphs proceed together
+```
+
+### Key Expression
+
+The `key` field uniquely identifies a task instance. It should include all parameters that affect the task's output.
+
+**Good Keys**:
+```yaml
+# Includes date and region - different dates/regions = different data
+key: "load_data_${params.batch_date}_${params.region}"
+
+# Includes all meaningful params
+key: "bootstrap_curves_${params.date}_${params.region}_${params.model_version}"
+```
+
+**Bad Keys**:
+```yaml
+# Too generic - all graphs share same execution even with different params
+key: "load_data"
+
+# Includes volatile data - every execution is "unique"
+key: "load_data_${params.batch_date}_${date.now()}"
+```
+
+### State Management
+
+Global tasks are tracked in Hazelcast:
+
+```java
+// Key structure
+record TaskExecutionKey(
+    String taskName,
+    String resolvedKey  // Evaluated expression
+) {}
+
+// State
+record GlobalTaskExecution(
+    UUID id,
+    String taskName,
+    String resolvedKey,
+    Map<String, Object> params,
+    TaskStatus status,
+    Set<UUID> linkedGraphExecutions,  // Which graphs are waiting
+    Instant startedAt,
+    Instant completedAt,
+    Map<String, Object> result
+) {}
+```
+
+### Execution Flow
+
+1. Graph A evaluates, needs global task with key `load_data_2025-10-17_us`
+2. Check Hazelcast for existing execution with that key
+3. **Not found** → Start new execution, add Graph A to linked graphs
+4. Graph B evaluates, needs same key
+5. **Found, status=RUNNING** → Add Graph B to linked graphs, don't start new execution
+6. Task completes → Notify both Graph A and Graph B
+7. Both graphs re-evaluate and schedule downstream tasks
+
+---
+
+## Parameter Scoping
+
+### Hierarchy (Highest to Lowest Priority)
+
+1. **Runtime Invocation** - Params passed when triggering graph
+2. **Graph Task Reference** - Params in graph's task definition
+3. **Global Task Defaults** - Defaults in global task definition
+4. **Graph Defaults** - Defaults in graph params
+
+### Example
+
+**Global Task**:
+```yaml
+# tasks/process-data.yaml
+name: process-data
+global: true
+key: "process_${params.date}_${params.region}"
+
+params:
+  date:
+    type: string
+    required: true
+  region:
+    type: string
+    default: us      # Level 3: Global task default
+  threads:
+    type: integer
+    default: 4       # Level 3: Global task default
+```
+
+**Graph**:
+```yaml
+# graphs/etl-pipeline.yaml
+name: etl-pipeline
+
+params:
+  date:
+    type: string
+    default: "${date.today()}"  # Level 4: Graph default
+  region:
+    type: string
+    default: eu                 # Level 4: Graph default (overrides global)
 
 tasks:
-  # Reference to global task
-  - task: load-market-data
-  
-  # Inline task with dependencies
-  - name: extract-prices
-    type: bq_extract
-    timeout_seconds: 300
-    config:
-      project: my-project
-      dataset: raw_data
-      table: prices
-      destination: gs://my-bucket/prices/*.parquet
-      format: parquet
-    depends_on:
-      - load-market-data
-  
-  - name: run-dataplex-quality
-    type: dataplex
-    timeout_seconds: 1800
-    config:
-      project: my-project
-      lake: analytics-lake
-      scan: market-data-quality
-    depends_on:
-      - extract-prices
-  
-  - name: aggregate-metrics
-    type: dataflow
-    timeout_seconds: 3600
-    config:
-      project: my-project
-      template: gs://my-bucket/templates/aggregate-market-metrics
-      parameters:
-        input: gs://my-bucket/prices/*.parquet
-        output: my-project:analytics.market_metrics
-    depends_on:
-      - run-dataplex-quality
+  - task: process-data
+    params:
+      date: "${params.date}"
+      region: "${params.region}"
+      threads: 8                # Level 2: Task reference override
 ```
 
-**Example - Multi-Source Graph**:
-```yaml
-# graphs/data-fusion.yaml
-name: data-fusion
-description: |
-  Combines multiple data sources for reporting.
-
-tasks:
-  # Two independent tasks can run in parallel
-  - task: load-market-data  # Global task
-  
-  - name: load-customer-data
-    type: dbt
-    config:
-      project: analytics
-      models: +customer_data
-  
-  # This task waits for both
-  - name: join-datasets
-    type: bq_extract
-    config:
-      query: |
-        SELECT * FROM market_data m
-        JOIN customer_data c ON m.customer_id = c.id
-      destination: gs://my-bucket/joined/*.parquet
-    depends_on:
-      - load-market-data
-      - load-customer-data
-  
-  - name: generate-report
-    type: dataflow
-    config:
-      template: gs://my-bucket/templates/report-generator
-      parameters:
-        input: gs://my-bucket/joined/*.parquet
-    depends_on:
-      - join-datasets
+**Runtime Invocation**:
+```bash
+curl -X POST /api/graphs/etl-pipeline/execute \
+  -d '{"params": {"date": "2025-10-15", "region": "asia"}}'
+# Level 1: Runtime override (highest priority)
 ```
 
-### Validation Rules
-
-The system must validate YAML configurations on load:
-
-1. **Task Validation**:
-   - Name matches `^[a-z0-9-]+$` pattern
-   - Type is one of the supported types
-   - Timeout is positive integer
-   - Config structure matches task type requirements
-   - If global=true, task can be referenced by multiple graphs
-
-2. **Graph Validation**:
-   - Name matches `^[a-z0-9-]+$` pattern
-   - At least one task defined
-   - All task references resolve to existing tasks
-   - All `depends_on` references exist in the graph
-   - No circular dependencies (DAG check using JGraphT)
-   - Each task appears at most once in the graph
-
-3. **Global Task Rules**:
-   - Global tasks can only be defined in `tasks/*.yaml` (not inline in graphs)
-   - Multiple graphs can reference the same global task
-   - When a global task completes, it marks completed for ALL graphs containing it
-
-## Core Components
-
-### Orchestrator Service Components
-
-**Purpose**: Load graph and task definitions from YAML files on startup.
-
-**Lifecycle**: Executes once on application startup.
-
-**Responsibilities**:
-- Read all files matching `tasks/*.yaml` and `graphs/*.yaml`
-- Parse YAML into domain objects
-- Validate configurations
-- Detect circular dependencies using JGraphT
-- Upsert into database via repositories
-- Log warnings for any invalid configurations
-
-**Interface**:
-```java
-@ApplicationScoped
-public class GraphLoader {
-    @Inject TaskRepository taskRepository;
-    @Inject GraphRepository graphRepository;
-    @Inject GraphValidator graphValidator;
-    @Inject Logger logger;
-    
-    @ConfigProperty(name = "orchestrator.config.path")
-    String configPath;
-    
-    void onStart(@Observes StartupEvent event) {
-        logger.info("Loading task and graph definitions from {}", configPath);
-        loadTasks();
-        loadGraphs();
-        logger.info("Configuration loading complete");
-    }
-    
-    private void loadTasks() {
-        Path tasksDir = Path.of(configPath, "tasks");
-        // Load all .yaml files
-        // Parse with SnakeYAML
-        // Validate each task
-        // Upsert via taskRepository
-    }
-    
-    private void loadGraphs() {
-        Path graphsDir = Path.of(configPath, "graphs");
-        // Load all .yaml files
-        // Parse with SnakeYAML
-        // Resolve task references
-        // Validate DAG structure
-        // Upsert via graphRepository
-    }
-}
+**Final Resolution**:
+```
+date: "2025-10-15"    (Level 1: runtime)
+region: "asia"        (Level 1: runtime)
+threads: 8            (Level 2: task reference)
 ```
 
-**Error Handling**:
-- Invalid YAML: Log error, skip file, continue loading others
-- Circular dependency: Log error, reject graph, fail startup
-- Missing task reference: Log error, reject graph, fail startup
-- Duplicate names: Log error, reject duplicate, keep first loaded
+---
 
-**Configuration**:
-```properties
-# application.properties
-orchestrator.config.path=/config
-orchestrator.config.reload-on-change=false  # Future: watch for changes
+## Development Mode
+
+### Single Process Architecture
+
+In dev mode, everything runs in one process:
+
+```
+┌─────────────────────────────────────────┐
+│      Single JVM Process                 │
+│                                         │
+│  Orchestrator Core                      │
+│  ↓                                      │
+│  Embedded Hazelcast                     │
+│  ↓                                      │
+│  Embedded Worker Pool (4 threads)       │
+│  ↓                                      │
+│  Local Event Store (./data/events)      │
+│  ↓                                      │
+│  Web UI (http://localhost:8080)         │
+└─────────────────────────────────────────┘
 ```
 
-#### 2. ExternalEventConsumer
-
-**Purpose**: Bridge external messaging system (Pub/Sub or Hazelcast) to internal Vert.x event bus.
-
-**Lifecycle**: Runs continuously, consuming from external topics.
-
-**Responsibilities**:
-- Consume messages from `events-topic` (task results)
-- Consume messages from `management-topic` (worker heartbeats, commands)
-- Transform external message formats to internal events
-- Publish to Vert.x event bus
-- Handle deserialization errors gracefully
-
-**Interface**:
-```java
-@ApplicationScoped
-public class ExternalEventConsumer {
-    @Inject EventBus eventBus;
-    @Inject Logger logger;
-    
-    @Incoming("external-events")  // Configured per environment
-    public CompletionStage<Void> onTaskEvent(Message<TaskEventMessage> message) {
-        TaskEventMessage external = message.getPayload();
-        logger.debug("Received task event: {}", external);
-        
-        try {
-            OrchestratorEvent internalEvent = switch(external.status()) {
-                case "STARTED" -> new TaskStartedEvent(
-                    external.executionId(), 
-                    external.workerId()
-                );
-                case "COMPLETED" -> new TaskCompletedEvent(
-                    external.executionId(), 
-                    external.result()
-                );
-                case "FAILED" -> new TaskFailedEvent(
-                    external.executionId(), 
-                    external.errorMessage(),
-                    external.attempt()
-                );
-                default -> {
-                    logger.warn("Unknown task status: {}", external.status());
-                    yield null;
-                }
-            };
-            
-            if (internalEvent != null) {
-                String address = "task." + external.status().toLowerCase();
-                eventBus.publish(address, internalEvent);
-            }
-            
-            return message.ack();
-        } catch (Exception e) {
-            logger.error("Error processing task event", e);
-            return message.nack(e);
-        }
-    }
-    
-    @Incoming("external-management")
-    public CompletionStage<Void> onManagementEvent(Message<ManagementEventMessage> message) {
-        ManagementEventMessage external = message.getPayload();
-        
-        try {
-            if ("HEARTBEAT".equals(external.type())) {
-                eventBus.publish("worker.heartbeat", new WorkerHeartbeatEvent(
-                    external.workerId(),
-                    external.timestamp()
-                ));
-            } else if ("REGISTERED".equals(external.type())) {
-                eventBus.publish("worker.registered", new WorkerRegisteredEvent(
-                    external.workerId(),
-                    external.metadata()
-                ));
-            }
-            
-            return message.ack();
-        } catch (Exception e) {
-            logger.error("Error processing management event", e);
-            return message.nack(e);
-        }
-    }
-}
+**Start command**:
+```bash
+./orchestrator --profile=dev
+# or
+java -jar orchestrator.jar --profile=dev
 ```
 
-**Message Formats**:
-
-*TaskEventMessage (from workers)*:
-```json
-{
-  "executionId": "uuid",
-  "taskName": "load-market-data",
-  "status": "COMPLETED|FAILED|STARTED",
-  "workerId": "worker-abc123",
-  "timestamp": "2025-10-17T10:30:00Z",
-  "attempt": 1,
-  "result": {},
-  "errorMessage": "optional error"
-}
+**Output**:
+```
+[INFO] Orchestrator starting in DEV mode
+[INFO] Loading graphs from ./graphs
+[INFO]   - daily-etl.yaml
+[INFO]   - market-pipeline.yaml
+[INFO] Loading tasks from ./tasks
+[INFO]   - load-market-data.yaml
+[INFO]   - bootstrap-curves.yaml
+[INFO] Starting embedded Hazelcast cluster
+[INFO] Hazelcast cluster formed (1 member)
+[INFO] Starting embedded worker pool with 4 threads
+[INFO]   - worker-thread-1 ready
+[INFO]   - worker-thread-2 ready
+[INFO]   - worker-thread-3 ready
+[INFO]   - worker-thread-4 ready
+[INFO] Starting web server on port 8080
+[INFO] 
+[INFO] ============================================
+[INFO] Orchestrator ready!
+[INFO] UI: http://localhost:8080
+[INFO] Mode: DEVELOPMENT
+[INFO] Trial Run: DISABLED
+[INFO] ============================================
 ```
 
-*ManagementEventMessage (from workers)*:
-```json
-{
-  "type": "HEARTBEAT|REGISTERED",
-  "workerId": "worker-abc123",
-  "timestamp": "2025-10-17T10:30:00Z",
-  "metadata": {
-    "podIp": "10.0.1.5",
-    "nodeName": "gke-node-1",
-    "capabilities": ["dbt", "bq_extract"]
-  }
-}
-```
+### Hot Reload
 
-#### 3. GraphEvaluator
-
-**Purpose**: Core orchestration logic - evaluate graph state and schedule ready tasks.
-
-**Lifecycle**: Event-driven, triggered by internal events.
-
-**Responsibilities**:
-- Build DAG from graph definition using JGraphT
-- Determine which tasks are ready to execute (dependencies met)
-- Handle global task coordination
-- Detect graph completion or stalling
-- Publish task scheduling events
-
-**Event Listeners**:
-- `task.completed` - Task finished successfully
-- `task.failed` - Task failed
-- `graph.evaluate` - Explicit request to evaluate
-- `task.retry` - Retry a failed task
-
-**Interface**:
-```java
-@ApplicationScoped
-public class GraphEvaluator {
-    @Inject EventBus eventBus;
-    @Inject JGraphTService graphService;
-    @Inject TaskExecutionRepository taskExecutionRepository;
-    @Inject GraphExecutionRepository graphExecutionRepository;
-    @Inject Logger logger;
-    
-    @ConsumeEvent("task.completed")
-    @ConsumeEvent("task.failed")
-    public void onTaskStatusChange(TaskEvent event) {
-        logger.info("Task {} changed to {}", event.executionId(), event.status());
-        
-        // Update database
-        taskExecutionRepository.updateStatus(
-            event.executionId(), 
-            TaskStatus.valueOf(event.status()),
-            event.errorMessage(),
-            event.result()
-        );
-        
-        // Find graph execution(s) to re-evaluate
-        TaskExecution te = taskExecutionRepository.findById(event.executionId());
-        
-        if (te.task().isGlobal()) {
-            // Global task affects multiple graphs
-            List<UUID> affectedGraphs = 
-                taskExecutionRepository.findGraphsContainingTask(te.task().name());
-            
-            logger.info("Global task {} affects {} graphs", 
-                te.task().name(), affectedGraphs.size());
-            
-            affectedGraphs.forEach(graphExecId -> 
-                eventBus.publish("graph.evaluate", graphExecId)
-            );
-        } else {
-            // Single graph affected
-            eventBus.publish("graph.evaluate", te.graphExecutionId());
-        }
-    }
-    
-    @ConsumeEvent("graph.evaluate")
-    @Transactional
-    public void evaluate(UUID graphExecutionId) {
-        logger.debug("Evaluating graph execution {}", graphExecutionId);
-        
-        GraphExecution execution = graphExecutionRepository.findById(graphExecutionId);
-        
-        // Build DAG
-        DirectedAcyclicGraph<Task, DefaultEdge> dag = 
-            graphService.buildDAG(execution.graph());
-        
-        // Get current task states
-        Map<Task, TaskStatus> taskStates = 
-            taskExecutionRepository.getTaskStates(graphExecutionId);
-        
-        // Find tasks ready to execute
-        Set<Task> readyTasks = graphService.findReadyTasks(dag, taskStates);
-        
-        logger.info("Found {} ready tasks for graph {}", 
-            readyTasks.size(), execution.graph().name());
-        
-        // Schedule each ready task
-        for (Task task : readyTasks) {
-            scheduleTask(graphExecutionId, task);
-        }
-        
-        // Check if graph is done
-        updateGraphStatus(graphExecutionId, taskStates, readyTasks);
-        
-        // Publish evaluation complete event
-        eventBus.publish("graph.evaluated", new GraphEvaluatedEvent(
-            graphExecutionId,
-            readyTasks.size()
-        ));
-    }
-    
-    private void scheduleTask(UUID graphExecutionId, Task task) {
-        if (task.isGlobal()) {
-            scheduleGlobalTask(graphExecutionId, task);
-        } else {
-            scheduleRegularTask(graphExecutionId, task);
-        }
-    }
-    
-    private void scheduleGlobalTask(UUID graphExecutionId, Task task) {
-        // Check if global task already running
-        Optional<TaskExecution> running = 
-            taskExecutionRepository.findRunningGlobalExecution(task.name());
-        
-        if (running.isPresent()) {
-            // Link this graph's execution to the running one
-            logger.info("Linking to existing global task execution: {}", 
-                running.get().id());
-            
-            taskExecutionRepository.linkToGlobalExecution(
-                graphExecutionId, 
-                task.id(), 
-                running.get().id()
-            );
-        } else {
-            // Start new global execution
-            scheduleRegularTask(graphExecutionId, task);
-        }
-    }
-    
-    private void scheduleRegularTask(UUID graphExecutionId, Task task) {
-        TaskExecution execution = taskExecutionRepository.create(
-            graphExecutionId,
-            task,
-            TaskStatus.PENDING
-        );
-        
-        logger.info("Scheduling task {} for graph execution {}", 
-            task.name(), graphExecutionId);
-        
-        eventBus.publish("task.ready", new TaskReadyEvent(
-            execution.id(),
-            task
-        ));
-    }
-    
-    private void updateGraphStatus(
-        UUID graphExecutionId, 
-        Map<Task, TaskStatus> taskStates,
-        Set<Task> readyTasks
-    ) {
-        boolean allCompleted = taskStates.values().stream()
-            .allMatch(s -> s == TaskStatus.COMPLETED || s == TaskStatus.SKIPPED);
-        
-        boolean anyFailed = taskStates.values().stream()
-            .anyMatch(s -> s == TaskStatus.FAILED);
-        
-        boolean stalled = readyTasks.isEmpty() && !allCompleted;
-        
-        GraphStatus newStatus;
-        if (allCompleted) {
-            newStatus = GraphStatus.COMPLETED;
-            eventBus.publish("graph.completed", 
-                new GraphCompletedEvent(graphExecutionId));
-        } else if (stalled) {
-            newStatus = GraphStatus.STALLED;
-            eventBus.publish("graph.stalled", 
-                new GraphStalledEvent(graphExecutionId));
-        } else if (anyFailed) {
-            newStatus = GraphStatus.FAILED;
-            eventBus.publish("graph.failed", 
-                new GraphFailedEvent(graphExecutionId));
-        } else {
-            newStatus = GraphStatus.RUNNING;
-        }
-        
-        graphExecutionRepository.updateStatus(graphExecutionId, newStatus);
-    }
-    
-    @ConsumeEvent("task.retry")
-    public void onTaskRetry(TaskReadyEvent event) {
-        logger.info("Retrying task execution {}", event.executionId());
-        
-        TaskExecution te = taskExecutionRepository.findById(event.executionId());
-        
-        if (te.attempt() < te.task().retryPolicy().maxRetries()) {
-            taskExecutionRepository.incrementAttempt(event.executionId());
-            eventBus.publish("task.ready", event);
-        } else {
-            logger.warn("Max retries exceeded for task execution {}", 
-                event.executionId());
-            
-            taskExecutionRepository.updateStatus(
-                event.executionId(),
-                TaskStatus.FAILED,
-                "Max retries exceeded",
-                null
-            );
-            
-            eventBus.publish("task.failed", new TaskFailedEvent(
-                event.executionId(),
-                "Max retries exceeded",
-                te.attempt()
-            ));
-        }
-    }
-}
-```
-
-#### 4. TaskQueuePublisher
-
-**Purpose**: Publish work to the queue for workers to consume.
-
-**Lifecycle**: Event-driven, triggered by "task.ready" events.
-
-**Responsibilities**:
-- Transform internal task events to external work messages
-- Publish to appropriate queue (via QueueService interface)
-- Update task status to QUEUED
-- Handle publishing failures
-
-**Interface**:
-```java
-@ApplicationScoped
-public class TaskQueuePublisher {
-    @Inject EventBus eventBus;
-    @Inject QueueService queueService;
-    @Inject TaskExecutionRepository taskExecutionRepository;
-    @Inject Logger logger;
-    
-    @ConsumeEvent("task.ready")
-    public Uni<Void> onTaskReady(TaskReadyEvent event) {
-        logger.info("Publishing task {} to queue", event.task().name());
-        
-        WorkMessage workMessage = new WorkMessage(
-            event.executionId(),
-            event.task().name(),
-            event.task().type(),
-            event.task().config(),
-            event.task().retryPolicy(),
-            event.task().timeoutSeconds()
-        );
-        
-        return queueService.publishWork(workMessage)
-            .invoke(() -> {
-                taskExecutionRepository.updateStatus(
-                    event.executionId(),
-                    TaskStatus.QUEUED,
-                    null,
-                    null
-                );
-                
-                eventBus.publish("task.queued", new TaskQueuedEvent(
-                    event.executionId(),
-                    event.task()
-                ));
-            })
-            .onFailure().invoke(error -> {
-                logger.error("Failed to publish task to queue", error);
-                
-                // Retry by re-publishing task.ready event after delay
-                Uni.createFrom().voidItem()
-                    .onItem().delayIt().by(Duration.ofSeconds(5))
-                    .subscribe().with(
-                        v -> eventBus.publish("task.ready", event)
-                    );
-            })
-            .replaceWithVoid();
-    }
-}
-```
-
-**WorkMessage Format**:
-```json
-{
-  "executionId": "uuid",
-  "taskName": "load-market-data",
-  "taskType": "dbt",
-  "config": {
-    "project": "analytics",
-    "models": "+market_data"
-  },
-  "retryPolicy": {
-    "maxRetries": 3,
-    "backoff": "exponential",
-    "initialDelaySeconds": 30
-  },
-  "timeoutSeconds": 600
-}
-```
-
-#### 5. WorkerMonitor
-
-**Purpose**: Monitor worker health and recover work from dead workers.
-
-**Lifecycle**: Scheduled task running every 30 seconds.
-
-**Responsibilities**:
-- Check worker heartbeats
-- Mark workers as dead if no heartbeat for 60 seconds
-- Publish "worker.died" events for dead workers
-- Update worker heartbeat timestamps
-
-**Interface**:
-```java
-@ApplicationScoped
-public class WorkerMonitor {
-    @Inject EventBus eventBus;
-    @Inject WorkerRepository workerRepository;
-    @Inject Logger logger;
-    
-    @ConfigProperty(name = "orchestrator.worker.dead-threshold-seconds")
-    int deadThresholdSeconds;
-    
-    @ConsumeEvent("worker.heartbeat")
-    @Transactional
-    public void onHeartbeat(WorkerHeartbeatEvent event) {
-        logger.trace("Heartbeat from worker {}", event.workerId());
-        workerRepository.updateHeartbeat(event.workerId(), event.timestamp());
-    }
-    
-    @ConsumeEvent("worker.registered")
-    @Transactional
-    public void onWorkerRegistered(WorkerRegisteredEvent event) {
-        logger.info("Worker registered: {}", event.workerId());
-        
-        workerRepository.upsert(new Worker(
-            event.workerId(),
-            WorkerStatus.ACTIVE,
-            Instant.now(),
-            Instant.now(),
-            event.metadata()
-        ));
-    }
-    
-    @Scheduled(every = "${orchestrator.worker.monitor-interval}")
-    @Transactional
-    public void checkDeadWorkers() {
-        Instant deadline = Instant.now()
-            .minusSeconds(deadThresholdSeconds);
-        
-        List<Worker> deadWorkers = workerRepository.findDeadWorkers(deadline);
-        
-        if (!deadWorkers.isEmpty()) {
-            logger.warn("Found {} dead workers", deadWorkers.size());
-            
-            for (Worker worker : deadWorkers) {
-                workerRepository.markDead(worker.id());
-                
-                eventBus.publish("worker.died", new WorkerDiedEvent(
-                    worker.id()
-                ));
-            }
-        }
-    }
-}
-```
-
-**Configuration**:
-```properties
-# application.properties
-orchestrator.worker.dead-threshold-seconds=60
-orchestrator.worker.monitor-interval=30s
-```
-
-#### 6. WorkRecoveryService
-
-**Purpose**: Recover work from dead workers.
-
-**Lifecycle**: Event-driven, triggered by "worker.died" events.
-
-**Responsibilities**:
-- Find all tasks assigned to dead worker
-- Retry tasks that haven't exceeded max retries
-- Fail tasks that have exceeded max retries
-- Clean up work assignments
-
-**Interface**:
-```java
-@ApplicationScoped
-public class WorkRecoveryService {
-    @Inject EventBus eventBus;
-    @Inject TaskExecutionRepository taskExecutionRepository;
-    @Inject WorkAssignmentRepository workAssignmentRepository;
-    @Inject Logger logger;
-    
-    @ConsumeEvent("worker.died")
-    @Transactional
-    public void recoverWork(WorkerDiedEvent event) {
-        logger.warn("Recovering work from dead worker: {}", event.workerId());
-        
-        List<TaskExecution> orphanedTasks = 
-            taskExecutionRepository.findByAssignedWorker(event.workerId());
-        
-        logger.info("Found {} orphaned tasks", orphanedTasks.size());
-        
-        for (TaskExecution te : orphanedTasks) {
-            recoverTask(te);
-            workAssignmentRepository.deleteByTaskExecution(te.id());
-        }
-    }
-    
-    private void recoverTask(TaskExecution te) {
-        if (te.attempt() < te.task().retryPolicy().maxRetries()) {
-            logger.info("Retrying task execution {} (attempt {}/{})",
-                te.id(), te.attempt(), te.task().retryPolicy().maxRetries());
-            
-            taskExecutionRepository.resetToPending(te.id());
-            
-            eventBus.publish("task.retry", new TaskReadyEvent(
-                te.id(),
-                te.task()
-            ));
-        } else {
-            logger.warn("Task execution {} exceeded max retries", te.id());
-            
-            taskExecutionRepository.updateStatus(
-                te.id(),
-                TaskStatus.FAILED,
-                "Worker died, max retries exceeded",
-                null
-            );
-            
-            eventBus.publish("task.failed", new TaskFailedEvent(
-                te.id(),
-                "Worker died, max retries exceeded",
-                te.attempt()
-            ));
-        }
-    }
-}
-```
-
-#### 7. JGraphTService
-
-**Purpose**: Build and query DAGs using JGraphT library.
-
-**Lifecycle**: Stateless service, used by GraphEvaluator.
-
-**Responsibilities**:
-- Build DirectedAcyclicGraph from graph definition
-- Detect cycles (throws exception)
-- Find topologically sorted execution order
-- Determine which tasks are ready (all dependencies completed)
-
-**Interface**:
-```java
-@ApplicationScoped
-public class JGraphTService {
-    @Inject Logger logger;
-    
-    /**
-     * Build a DAG from a graph definition.
-     * @throws CycleFoundException if graph contains cycles
-     */
-    public DirectedAcyclicGraph<Task, DefaultEdge> buildDAG(Graph graph) {
-        DirectedAcyclicGraph<Task, DefaultEdge> dag = 
-            new DirectedAcyclicGraph<>(DefaultEdge.class);
-        
-        // Add all tasks as vertices
-        for (Task task : graph.tasks()) {
-            dag.addVertex(task);
-        }
-        
-        // Add edges from dependencies
-        for (GraphEdge edge : graph.edges()) {
-            try {
-                dag.addEdge(edge.fromTask(), edge.toTask());
-            } catch (IllegalArgumentException e) {
-                throw new CycleFoundException(
-                    "Cycle detected in graph: " + graph.name(), e);
-            }
-        }
-        
-        logger.debug("Built DAG for graph {} with {} vertices and {} edges",
-            graph.name(), dag.vertexSet().size(), dag.edgeSet().size());
-        
-        return dag;
-    }
-    
-    /**
-     * Find tasks that are ready to execute.
-     * A task is ready if all its dependencies are COMPLETED or SKIPPED.
-     */
-    public Set<Task> findReadyTasks(
-        DirectedAcyclicGraph<Task, DefaultEdge> dag,
-        Map<Task, TaskStatus> currentStates
-    ) {
-        Set<Task> ready = new HashSet<>();
-        
-        for (Task task : dag.vertexSet()) {
-            TaskStatus status = currentStates.getOrDefault(task, TaskStatus.PENDING);
-            
-            // Skip if already queued, running, completed, or failed
-            if (status != TaskStatus.PENDING) {
-                continue;
-            }
-            
-            // Check if all dependencies are satisfied
-            Set<DefaultEdge> incomingEdges = dag.incomingEdgesOf(task);
-            boolean allDependenciesMet = true;
-            
-            for (DefaultEdge edge : incomingEdges) {
-                Task dependency = dag.getEdgeSource(edge);
-                TaskStatus depStatus = currentStates.get(dependency);
-                
-                if (depStatus != TaskStatus.COMPLETED && depStatus != TaskStatus.SKIPPED) {
-                    allDependenciesMet = false;
-                    break;
-                }
-            }
-            
-            if (allDependenciesMet) {
-                ready.add(task);
-            }
-        }
-        
-        return ready;
-    }
-    
-    /**
-     * Get topological sort of tasks (useful for UI visualization).
-     */
-    public List<Task> getTopologicalOrder(DirectedAcyclicGraph<Task, DefaultEdge> dag) {
-        TopologicalOrderIterator<Task, DefaultEdge> iterator = 
-            new TopologicalOrderIterator<>(dag);
-        
-        List<Task> order = new ArrayList<>();
-        iterator.forEachRemaining(order::add);
-        
-        return order;
-    }
-}
-```
-
-### Worker Pod Components
-
-#### 1. WorkerMain
-
-**Purpose**: Main entry point for worker pod.
-
-**Lifecycle**: Runs continuously until killed.
-
-**Responsibilities**:
-- Register with orchestrator on startup
-- Start heartbeat timer
-- Listen for work from queue
-- Listen for management commands
-- Graceful shutdown
-
-**Interface**:
-```java
-@ApplicationScoped
-public class WorkerMain {
-    @Inject TaskExecutor taskExecutor;
-    @Inject QueueService queueService;
-    @Inject ManagementService managementService;
-    @Inject Logger logger;
-    
-    @ConfigProperty(name = "worker.id")
-    String workerId;  // Defaults to $HOSTNAME
-    
-    @ConfigProperty(name = "worker.heartbeat-interval-seconds")
-    int heartbeatIntervalSeconds;
-    
-    private volatile boolean running = true;
-    
-    void onStart(@Observes StartupEvent event) {
-        logger.info("Worker {} starting", workerId);
-        
-        // Register with orchestrator
-        managementService.register(workerId, getMetadata());
-        
-        // Start heartbeat
-        startHeartbeat();
-        
-        // Start listening for management commands
-        managementService.listenForCommands(this::onManagementCommand);
-        
-        logger.info("Worker {} ready", workerId);
-    }
-    
-    void onStop(@Observes ShutdownEvent event) {
-        logger.info("Worker {} shutting down", workerId);
-        running = false;
-    }
-    
-    @Incoming("work-queue")
-    public CompletionStage<Void> processWork(Message<WorkMessage> message) {
-        if (!running) {
-            logger.warn("Worker shutting down, rejecting work");
-            return message.nack(new IllegalStateException("Worker shutting down"));
-        }
-        
-        WorkMessage work = message.getPayload();
-        logger.info("Received work: task={}, execution={}", 
-            work.taskName(), work.executionId());
-        
-        try {
-            // Register assignment
-            managementService.registerAssignment(work.executionId(), workerId);
-            
-            // Notify started
-            managementService.publishTaskStarted(work.executionId(), workerId);
-            
-            // Execute task
-            TaskResult result = taskExecutor.execute(work);
-            
-            // Publish result
-            if (result.isSuccess()) {
-                managementService.publishTaskCompleted(
-                    work.executionId(), 
-                    workerId,
-                    result.data()
-                );
-            } else {
-                managementService.publishTaskFailed(
-                    work.executionId(),
-                    workerId,
-                    result.error(),
-                    work.attempt()
-                );
-            }
-            
-            return message.ack();
-            
-        } catch (Exception e) {
-            logger.error("Error processing work", e);
-            
-            managementService.publishTaskFailed(
-                work.executionId(),
-                workerId,
-                e.getMessage(),
-                work.attempt()
-            );
-            
-            return message.nack(e);
-        }
-    }
-    
-    private void startHeartbeat() {
-        Executors.newSingleThreadScheduledExecutor().scheduleAtFixedRate(
-            () -> {
-                if (running) {
-                    try {
-                        managementService.sendHeartbeat(workerId);
-                    } catch (Exception e) {
-                        logger.error("Error sending heartbeat", e);
-                    }
-                }
-            },
-            0,
-            heartbeatIntervalSeconds,
-            TimeUnit.SECONDS
-        );
-    }
-    
-    private void onManagementCommand(ManagementCommand cmd) {
-        if ("KILL".equals(cmd.type()) && workerId.equals(cmd.targetWorker())) {
-            logger.warn("Received KILL command, shutting down");
-            running = false;
-            System.exit(0);
-        }
-    }
-    
-    private Map<String, Object> getMetadata() {
-        return Map.of(
-            "podIp", System.getenv().getOrDefault("POD_IP", "unknown"),
-            "nodeName", System.getenv().getOrDefault("NODE_NAME", "unknown"),
-            "capabilities", List.of("dbt", "bq_extract", "dataplex", "dataflow")
-        );
-    }
-}
-```
-
-**Configuration**:
-```properties
-# application.properties
-worker.id=${HOSTNAME}
-worker.heartbeat-interval-seconds=10
-```
-
-#### 2. TaskExecutor
-
-**Purpose**: Dispatch work to appropriate task handlers.
-
-**Lifecycle**: Stateless service.
-
-**Responsibilities**:
-- Route work based on task type
-- Apply timeout enforcement
-- Catch and wrap exceptions
-- Return standardized results
-
-**Interface**:
-```java
-@ApplicationScoped
-public class TaskExecutor {
-    @Inject DbtHandler dbtHandler;
-    @Inject BqExtractHandler bqExtractHandler;
-    @Inject DataplexHandler dataplexHandler;
-    @Inject DataflowHandler dataflowHandler;
-    @Inject Logger logger;
-    
-    public TaskResult execute(WorkMessage work) {
-        logger.info("Executing task: type={}, name={}", 
-            work.taskType(), work.taskName());
-        
-        try {
-            TaskResult result = executeWithTimeout(work);
-            
-            logger.info("Task completed successfully: {}", work.taskName());
-            return result;
-            
-        } catch (TimeoutException e) {
-            logger.error("Task timed out: {}", work.taskName());
-            return TaskResult.failure("Task execution timed out after " + 
-                work.timeoutSeconds() + " seconds");
-                
-        } catch (Exception e) {
-            logger.error("Task failed: " + work.taskName(), e);
-            return TaskResult.failure(e.getMessage());
-        }
-    }
-    
-    private TaskResult executeWithTimeout(WorkMessage work) 
-            throws TimeoutException, InterruptedException, ExecutionException {
-        
-        ExecutorService executor = Executors.newSingleThreadExecutor();
-        
-        Future<TaskResult> future = executor.submit(() -> {
-            return switch(work.taskType()) {
-                case DBT -> dbtHandler.execute(work.config());
-                case BQ_EXTRACT -> bqExtractHandler.execute(work.config());
-                case DATAPLEX -> dataplexHandler.execute(work.config());
-                case DATAFLOW -> dataflowHandler.execute(work.config());
-            };
-        });
-        
-        try {
-            return future.get(work.timeoutSeconds(), TimeUnit.SECONDS);
-        } finally {
-            executor.shutdownNow();
-        }
-    }
-}
-```
-
-#### 3. Task Handlers
-
-Each task type has a dedicated handler. All handlers implement a common interface:
-
-```java
-public interface TaskHandler {
-    TaskResult execute(Map<String, Object> config);
-}
-```
-
-**DbtHandler**:
-```java
-@ApplicationScoped
-public class DbtHandler implements TaskHandler {
-    @Inject Logger logger;
-    
-    @Override
-    public TaskResult execute(Map<String, Object> config) {
-        String project = (String) config.get("project");
-        String models = (String) config.get("models");
-        String target = (String) config.getOrDefault("target", "prod");
-        
-        logger.info("Running DBT: project={}, models={}, target={}", 
-            project, models, target);
-        
-        try {
-            // Execute DBT via CLI
-            ProcessBuilder pb = new ProcessBuilder(
-                "dbt", "run",
-                "--project-dir", "/dbt/" + project,
-                "--models", models,
-                "--target", target
-            );
-            
-            Process process = pb.start();
-            int exitCode = process.waitFor();
-            
-            if (exitCode == 0) {
-                return TaskResult.success(Map.of(
-                    "models_run", extractModelsFromOutput(process)
-                ));
-            } else {
-                String error = new String(process.getErrorStream().readAllBytes());
-                return TaskResult.failure("DBT failed: " + error);
-            }
-            
-        } catch (Exception e) {
-            logger.error("Error executing DBT", e);
-            return TaskResult.failure(e.getMessage());
-        }
-    }
-    
-    private List<String> extractModelsFromOutput(Process process) {
-        // Parse DBT output to get list of models that ran
-        // Implementation details omitted
-        return List.of();
-    }
-}
-```
-
-**BqExtractHandler**:
-```java
-@ApplicationScoped
-public class BqExtractHandler implements TaskHandler {
-    @Inject Logger logger;
-    
-    @Override
-    public TaskResult execute(Map<String, Object> config) {
-        String project = (String) config.get("project");
-        String dataset = (String) config.get("dataset");
-        String table = (String) config.get("table");
-        String destination = (String) config.get("destination");
-        
-        logger.info("Extracting BQ table: {}.{}.{} to {}", 
-            project, dataset, table, destination);
-        
-        try {
-            BigQuery bigquery = BigQueryOptions.newBuilder()
-                .setProjectId(project)
-                .build()
-                .getService();
-            
-            TableId tableId = TableId.of(project, dataset, table);
-            String format = (String) config.getOrDefault("format", "PARQUET");
-            
-            ExtractJobConfiguration configuration = ExtractJobConfiguration.newBuilder(
-                    tableId,
-                    destination
-                )
-                .setFormat(format)
-                .build();
-            
-            Job job = bigquery.create(JobInfo.of(configuration));
-            job = job.waitFor();
-            
-            if (job.getStatus().getError() == null) {
-                return TaskResult.success(Map.of(
-                    "destination", destination,
-                    "bytes_exported", job.getStatistics().toString()
-                ));
-            } else {
-                return TaskResult.failure("BQ Extract failed: " + 
-                    job.getStatus().getError());
-            }
-            
-        } catch (Exception e) {
-            logger.error("Error extracting from BigQuery", e);
-            return TaskResult.failure(e.getMessage());
-        }
-    }
-}
-```
-
-**DataplexHandler** and **DataflowHandler** follow similar patterns, using respective GCP client libraries.
-
-## Interfaces and Abstractions
-
-### Repository Pattern
-
-All data access goes through repository interfaces, allowing easy swapping between implementations.
-
-#### Base Repository Interface
-
-```java
-public interface Repository<T, ID> {
-    T findById(ID id);
-    Optional<T> findByIdOptional(ID id);
-    List<T> findAll();
-    T save(T entity);
-    void delete(ID id);
-}
-```
-
-#### GraphRepository
-
-```java
-public interface GraphRepository extends Repository<Graph, UUID> {
-    Optional<Graph> findByName(String name);
-    Graph upsertFromYaml(String name, String yamlContent);
-    List<Graph> findAll();
-}
-
-@ApplicationScoped
-@RequiresDialect(Database.POSTGRESQL)
-public class PostgresGraphRepository implements GraphRepository {
-    @Inject DataSource dataSource;
-    
-    @Override
-    public Graph findById(UUID id) {
-        // JDBC query
-    }
-    
-    @Override
-    public Graph upsertFromYaml(String name, String yamlContent) {
-        // INSERT ... ON CONFLICT UPDATE
-    }
-}
-
-@ApplicationScoped
-@RequiresDialect(Database.H2)
-public class H2GraphRepository implements GraphRepository {
-    @Inject DataSource dataSource;
-    
-    // H2-specific implementation (MERGE syntax)
-}
-```
-
-#### TaskRepository
-
-```java
-public interface TaskRepository extends Repository<Task, UUID> {
-    Optional<Task> findByName(String name);
-    Task upsertFromYaml(String name, TaskDefinition definition);
-    List<Task> findGlobalTasks();
-}
-```
-
-#### TaskExecutionRepository
-
-```java
-public interface TaskExecutionRepository extends Repository<TaskExecution, UUID> {
-    TaskExecution create(UUID graphExecutionId, Task task, TaskStatus initialStatus);
-    void updateStatus(UUID id, TaskStatus status, String error, Map<String, Object> result);
-    Map<Task, TaskStatus> getTaskStates(UUID graphExecutionId);
-    List<TaskExecution> findByAssignedWorker(String workerId);
-    Optional<TaskExecution> findRunningGlobalExecution(String taskName);
-    void linkToGlobalExecution(UUID graphExecId, UUID taskId, UUID globalExecId);
-    void resetToPending(UUID id);
-    void incrementAttempt(UUID id);
-    List<UUID> findGraphsContainingTask(String taskName);
-}
-```
-
-#### GraphExecutionRepository
-
-```java
-public interface GraphExecutionRepository extends Repository<GraphExecution, UUID> {
-    GraphExecution create(UUID graphId, String triggeredBy);
-    void updateStatus(UUID id, GraphStatus status);
-    GraphExecution getCurrentExecution(UUID graphId);
-    List<GraphExecution> getHistory(UUID graphId, int limit);
-}
-```
-
-#### WorkerRepository
-
-```java
-public interface WorkerRepository extends Repository<Worker, String> {
-    void upsert(Worker worker);
-    void updateHeartbeat(String workerId, Instant timestamp);
-    void markDead(String workerId);
-    List<Worker> findDeadWorkers(Instant deadlineBefore);
-    List<Worker> findActive();
-}
-```
-
-#### WorkAssignmentRepository
-
-```java
-public interface WorkAssignmentRepository {
-    void create(UUID taskExecutionId, String workerId);
-    void deleteByTaskExecution(UUID taskExecutionId);
-    Optional<WorkAssignment> findByTaskExecution(UUID taskExecutionId);
-}
-```
-
-### Queue Abstraction
-
-Queue operations are abstracted behind an interface to support multiple implementations.
-
-#### QueueService Interface
-
-```java
-public interface QueueService {
-    /**
-     * Publish work to the task queue.
-     * Returns a Uni for async/reactive handling.
-     */
-    Uni<Void> publishWork(WorkMessage message);
-    
-    /**
-     * Publish an event (task result).
-     */
-    Uni<Void> publishEvent(TaskEventMessage message);
-    
-    /**
-     * Publish to management topic.
-     */
-    Uni<Void> publishManagement(ManagementEventMessage message);
-}
-```
-
-#### PubSubQueueService (Production)
-
-```java
-@ApplicationScoped
-@RequiresProfile("prod")
-public class PubSubQueueService implements QueueService {
-    @Inject Logger logger;
-    
-    @ConfigProperty(name = "pubsub.project")
-    String projectId;
-    
-    @ConfigProperty(name = "pubsub.topic.work")
-    String workTopicName;
-    
-    @ConfigProperty(name = "pubsub.topic.events")
-    String eventsTopicName;
-    
-    @ConfigProperty(name = "pubsub.topic.management")
-    String managementTopicName;
-    
-    private Publisher workPublisher;
-    private Publisher eventsPublisher;
-    private Publisher managementPublisher;
-    
-    @PostConstruct
-    void init() throws IOException {
-        TopicName workTopic = TopicName.of(projectId, workTopicName);
-        TopicName eventsTopic = TopicName.of(projectId, eventsTopicName);
-        TopicName mgmtTopic = TopicName.of(projectId, managementTopicName);
-        
-        workPublisher = Publisher.newBuilder(workTopic).build();
-        eventsPublisher = Publisher.newBuilder(eventsTopic).build();
-        managementPublisher = Publisher.newBuilder(mgmtTopic).build();
-    }
-    
-    @Override
-    public Uni<Void> publishWork(WorkMessage message) {
-        String json = toJson(message);
-        PubsubMessage pubsubMessage = PubsubMessage.newBuilder()
-            .setData(ByteString.copyFromUtf8(json))
-            .build();
-        
-        return Uni.createFrom().completionStage(
-            workPublisher.publish(pubsubMessage)
-        ).replaceWithVoid();
-    }
-    
-    @Override
-    public Uni<Void> publishEvent(TaskEventMessage message) {
-        String json = toJson(message);
-        PubsubMessage pubsubMessage = PubsubMessage.newBuilder()
-            .setData(ByteString.copyFromUtf8(json))
-            .build();
-        
-        return Uni.createFrom().completionStage(
-            eventsPublisher.publish(pubsubMessage)
-        ).replaceWithVoid();
-    }
-    
-    @Override
-    public Uni<Void> publishManagement(ManagementEventMessage message) {
-        String json = toJson(message);
-        PubsubMessage pubsubMessage = PubsubMessage.newBuilder()
-            .setData(ByteString.copyFromUtf8(json))
-            .build();
-        
-        return Uni.createFrom().completionStage(
-            managementPublisher.publish(pubsubMessage)
-        ).replaceWithVoid();
-    }
-    
-    @PreDestroy
-    void cleanup() {
-        if (workPublisher != null) workPublisher.shutdown();
-        if (eventsPublisher != null) eventsPublisher.shutdown();
-        if (managementPublisher != null) managementPublisher.shutdown();
-    }
-    
-    private String toJson(Object obj) {
-        // Use Jackson or similar
-        return "{}";
-    }
-}
-```
-
-#### HazelcastQueueService (Local Dev)
+In dev mode, watch for file changes:
 
 ```java
 @ApplicationScoped
 @RequiresProfile("dev")
-public class HazelcastQueueService implements QueueService {
-    @Inject Logger)
-);
-
--- ... (rest of schema from Data Model section)
+public class ConfigWatcher {
+    @ConfigProperty(name = "orchestrator.config.watch")
+    boolean watchEnabled;
+    
+    void onStart(@Observes StartupEvent event) {
+        if (watchEnabled) {
+            startWatching();
+        }
+    }
+    
+    private void startWatching() {
+        WatchService watchService = FileSystems.getDefault().newWatchService();
+        
+        Path graphsDir = Path.of("./graphs");
+        Path tasksDir = Path.of("./tasks");
+        
+        graphsDir.register(watchService, ENTRY_MODIFY, ENTRY_CREATE);
+        tasksDir.register(watchService, ENTRY_MODIFY, ENTRY_CREATE);
+        
+        new Thread(() -> {
+            while (true) {
+                WatchKey key = watchService.take();
+                
+                for (WatchEvent<?> event : key.pollEvents()) {
+                    Path changed = (Path) event.context();
+                    logger.info("Config file changed: {}", changed);
+                    
+                    // Reload
+                    if (changed.toString().endsWith(".yaml")) {
+                        reloadConfig(changed);
+                    }
+                }
+                
+                key.reset();
+            }
+        }).start();
+    }
+    
+    private void reloadConfig(Path file) {
+        try {
+            if (file.getParent().endsWith("graphs")) {
+                graphLoader.reloadGraph(file);
+            } else if (file.getParent().endsWith("tasks")) {
+                graphLoader.reloadTask(file);
+            }
+            logger.info("✓ Config reloaded: {}", file);
+        } catch (Exception e) {
+            logger.error("✗ Failed to reload config: {}", file, e);
+        }
+    }
+}
 ```
 
-```sql
--- V2__add_version_columns.sql
-ALTER TABLE task_executions ADD COLUMN version INT NOT NULL DEFAULT 0;
-ALTER TABLE task_executions ADD COLUMN last_event_sequence BIGINT NOT NULL DEFAULT 0;
-ALTER TABLE graph_executions ADD COLUMN version INT NOT NULL DEFAULT 0;
-```
+### Trial Run Mode
 
-```sql
--- V3__add_pause_support.sql
-ALTER TABLE graph_executions 
-    DROP CONSTRAINT graph_executions_status_valid;
+Execute graphs without actually running commands. Perfect for testing configuration.
 
-ALTER TABLE graph_executions
-    ADD CONSTRAINT graph_executions_status_valid 
-    CHECK (status IN ('running', 'completed', 'failed', 'stalled', 'paused'));
-```
-
-### Kubernetes Manifests
-
-#### Namespace
-
+**Enable**:
 ```yaml
-# namespace.yaml
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: orchestrator
+# application-dev.yaml
+orchestrator:
+  dev:
+    trial-run: true
 ```
 
-#### ConfigMap
+**Behavior**:
+```java
+@ApplicationScoped
+public class TaskExecutor {
+    @ConfigProperty(name = "orchestrator.dev.trial-run")
+    boolean trialRun;
+    
+    public TaskResult execute(WorkMessage work) {
+        String fullCommand = buildCommandString(work);
+        
+        if (trialRun) {
+            // Log what would execute, but don't execute
+            logger.info("TRIAL RUN - Would execute: {}", fullCommand);
+            logger.info("  Working dir: {}", work.workingDir());
+            logger.info("  Environment: {}", work.env());
+            logger.info("  Timeout: {}s", work.timeoutSeconds());
+            
+            // Return fake success
+            return TaskResult.success(Map.of(
+                "trial_run", true,
+                "command", fullCommand
+            ));
+        }
+        
+        // Real execution
+        return executeCommand(work);
+    }
+}
+```
 
+**Output**:
+```
+[INFO] Graph execution started: daily-etl (trial-run)
+[INFO] Task: load-market-data
+[INFO]   TRIAL RUN - Would execute: dbt run --models +market_data --vars batch_date:2025-10-17
+[INFO]   Working dir: /opt/dbt
+[INFO]   Environment: {DBT_PROFILES_DIR=/dbt/profiles, DBT_TARGET=dev}
+[INFO]   Timeout: 600s
+[INFO] Task: transform-data
+[INFO]   TRIAL RUN - Would execute: python /scripts/transform.py --date 2025-10-17
+[INFO]   Working dir: /opt/scripts
+[INFO]   Environment: {PYTHONUNBUFFERED=1}
+[INFO]   Timeout: 300s
+[INFO] Graph execution completed: daily-etl (trial-run) - 0.5s
+```
+
+### Web-Based YAML Editor
+
+In dev mode, enable in-browser editing of graphs and tasks.
+
+**Enable**:
 ```yaml
-# configmap.yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: workflow-definitions
-  namespace: orchestrator
-data:
-  # Tasks
-  load-market-data.yaml: |
-    name: load-market-data
-    type: dbt
-    global: true
-    retry_policy:
-      max_retries: 3
-      backoff: exponential
-      initial_delay_seconds: 30
-    timeout_seconds: 600
-    config:
-      project: analytics
-      models: +market_data
-      target: prod
+orchestrator:
+  dev:
+    enable-editor: true
+```
+
+**UI Route**: `/editor`
+
+**Features**:
+- Monaco Editor (VS Code's editor)
+- YAML syntax highlighting
+- Real-time validation
+- Save to file
+- Auto-reload on save
+
+**Implementation**:
+```html
+<!-- editor.html -->
+<div class="page-body">
+  <div class="container-xl">
+    <div class="row">
+      <div class="col-3">
+        <div class="card">
+          <div class="card-header">
+            <h3 class="card-title">Files</h3>
+          </div>
+          <div class="list-group list-group-flush">
+            <div class="list-group-item">
+              <div class="text-muted">Graphs</div>
+              {#for graph in graphs}
+              <a href="#" onclick="loadFile('graphs/{graph}.yaml')" 
+                 class="list-group-item list-group-item-action">
+                {graph}.yaml
+              </a>
+              {/for}
+            </div>
+            <div class="list-group-item">
+              <div class="text-muted">Tasks</div>
+              {#for task in tasks}
+              <a href="#" onclick="loadFile('tasks/{task}.yaml')" 
+                 class="list-group-item list-group-item-action">
+                {task}.yaml
+              </a>
+              {/for}
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <div class="col-9">
+        <div class="card">
+          <div class="card-header">
+            <h3 class="card-title" id="filename"></h3>
+            <div class="card-actions">
+              <button class="btn btn-primary" onclick="saveFile()">
+                <i class="ti ti-device-floppy"></i> Save
+              </button>
+              <button class="btn btn-secondary" onclick="validateFile()">
+                <i class="ti ti-check"></i> Validate
+              </button>
+            </div>
+          </div>
+          <div class="card-body p-0">
+            <div id="editor" style="height: 600px;"></div>
+          </div>
+          <div class="card-footer" id="validation-result"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/monaco-editor@latest/min/vs/loader.js"></script>
+<script>
+let editor;
+let currentFile;
+
+require.config({ 
+  paths: { 
+    vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@latest/min/vs' 
+  }
+});
+
+require(['vs/editor/editor.main'], function() {
+  editor = monaco.editor.create(document.getElementById('editor'), {
+    language: 'yaml',
+    theme: 'vs-dark',
+    automaticLayout: true,
+    minimap: { enabled: false }
+  });
+});
+
+async function loadFile(path) {
+  currentFile = path;
+  document.getElementById('filename').textContent = path;
   
-  # Graphs
-  market-pipeline.yaml: |
-    name: market-pipeline
-    description: Daily market data processing pipeline
-    tasks:
-      - task: load-market-data
-      - name: extract-prices
-        type: bq_extract
-        timeout_seconds: 300
-        config:
-          project: my-project
-          dataset: raw_data
-          table: prices
-          destination: gs://my-bucket/prices/*.parquet
-        depends_on:
-          - load-market-data
+  const response = await fetch('/api/editor/load?path=' + path);
+  const content = await response.text();
+  
+  editor.setValue(content);
+}
+
+async function saveFile() {
+  const content = editor.getValue();
+  
+  const response = await fetch('/api/editor/save', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      path: currentFile,
+      content: content
+    })
+  });
+  
+  if (response.ok) {
+    showValidation('✓ File saved successfully', 'success');
+  } else {
+    const error = await response.text();
+    showValidation('✗ Save failed: ' + error, 'danger');
+  }
+}
+
+async function validateFile() {
+  const content = editor.getValue();
+  
+  const response = await fetch('/api/editor/validate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      path: currentFile,
+      content: content
+    })
+  });
+  
+  const result = await response.json();
+  
+  if (result.valid) {
+    showValidation('✓ Valid YAML', 'success');
+  } else {
+    showValidation('✗ ' + result.error, 'danger');
+  }
+}
+
+function showValidation(message, type) {
+  const resultDiv = document.getElementById('validation-result');
+  resultDiv.innerHTML = `<div class="alert alert-${type}">${message}</div>`;
+  setTimeout(() => {
+    resultDiv.innerHTML = '';
+  }, 3000);
+}
+</script>
 ```
 
-#### Secrets
-
-```yaml
-# secrets.yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: orchestrator-secrets
-  namespace: orchestrator
-type: Opaque
-stringData:
-  cloudsql-username: orchestrator
-  cloudsql-password: <password>
-  oauth-client-secret: <oauth-secret>
+**API Endpoints**:
+```java
+@Path("/api/editor")
+@RequiresProfile("dev")
+public class EditorController {
+    @ConfigProperty(name = "orchestrator.config.graphs")
+    String graphsPath;
+    
+    @ConfigProperty(name = "orchestrator.config.tasks")
+    String tasksPath;
+    
+    @GET
+    @Path("/load")
+    public String loadFile(@QueryParam("path") String path) {
+        Path filePath = resolveSecurePath(path);
+        return Files.readString(filePath);
+    }
+    
+    @POST
+    @Path("/save")
+    public Response saveFile(SaveRequest request) {
+        Path filePath = resolveSecurePath(request.path());
+        
+        // Validate first
+        ValidationResult validation = validator.validate(request.content());
+        if (!validation.isValid()) {
+            return Response.status(400).entity(validation.error()).build();
+        }
+        
+        // Write to file
+        Files.writeString(filePath, request.content());
+        
+        // Trigger reload
+        if (request.path().startsWith("graphs/")) {
+            graphLoader.reloadGraph(filePath);
+        } else {
+            taskLoader.reloadTask(filePath);
+        }
+        
+        return Response.ok().build();
+    }
+    
+    @POST
+    @Path("/validate")
+    public ValidationResult validateFile(ValidateRequest request) {
+        return validator.validate(request.content());
+    }
+    
+    private Path resolveSecurePath(String path) {
+        // Prevent directory traversal
+        Path base = Path.of(graphsPath).getParent();
+        Path resolved = base.resolve(path).normalize();
+        
+        if (!resolved.startsWith(base)) {
+            throw new SecurityException("Invalid path");
+        }
+        
+        return resolved;
+    }
+}
 ```
 
-#### Cloud SQL Proxy
+---
 
+## Production Deployment
+
+### GKE Architecture
+
+**Components**:
+1. Orchestrator (1 replica) - Stateless, can be restarted
+2. Worker Pods (2-20 replicas, HPA) - Pull work from Hazelcast queue
+3. Hazelcast Cluster (3 nodes, 1 per AZ) - State storage
+4. ConfigMap - Graph and task YAML files
+5. GCS - Event log storage
+
+### Hazelcast Cluster
+
+**StatefulSet**:
 ```yaml
-# cloudsql-proxy.yaml
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
-  name: cloudsql-proxy
+  name: hazelcast
   namespace: orchestrator
 spec:
-  replicas: 1
+  serviceName: hazelcast
+  replicas: 3
   selector:
     matchLabels:
-      app: cloudsql-proxy
+      app: hazelcast
   template:
     metadata:
       labels:
-        app: cloudsql-proxy
+        app: hazelcast
     spec:
-      serviceAccountName: orchestrator-sa
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - hazelcast
+            topologyKey: topology.kubernetes.io/zone
       containers:
-      - name: cloud-sql-proxy
-        image: gcr.io/cloudsql-docker/gce-proxy:latest
-        command:
-          - "/cloud_sql_proxy"
-          - "-instances=<PROJECT_ID>:<REGION>:<INSTANCE>=tcp:0.0.0.0:5432"
+      - name: hazelcast
+        image: hazelcast/hazelcast:5.3
+        env:
+        - name: JAVA_OPTS
+          value: "-Xms2g -Xmx2g"
         ports:
-        - containerPort: 5432
+        - containerPort: 5701
+        resources:
+          requests:
+            memory: 2Gi
+            cpu: 500m
+          limits:
+            memory: 4Gi
+            cpu: 2000m
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: cloudsql-proxy
+  name: hazelcast
   namespace: orchestrator
 spec:
+  clusterIP: None
   selector:
-    app: cloudsql-proxy
+    app: hazelcast
   ports:
-  - port: 5432
-    targetPort: 5432
+  - port: 5701
 ```
 
-#### Orchestrator Deployment
+### Orchestrator Deployment
 
 ```yaml
-# orchestrator-deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: orchestrator
   namespace: orchestrator
 spec:
-  replicas: 1  # Single instance, no HA
+  replicas: 1
   strategy:
-    type: Recreate  # Kill old pod before starting new one
+    type: Recreate  # Kill old before starting new
   selector:
     matchLabels:
       app: orchestrator
@@ -2078,50 +1174,35 @@ spec:
       serviceAccountName: orchestrator-sa
       containers:
       - name: orchestrator
-        image: gcr.io/<PROJECT_ID>/orchestrator:latest
-        ports:
-        - containerPort: 8080
-          name: http
+        image: gcr.io/project/orchestrator:latest
         env:
         - name: QUARKUS_PROFILE
-          value: "prod"
-        - name: GCP_PROJECT_ID
-          value: "<PROJECT_ID>"
-        - name: CLOUDSQL_HOST
-          value: "cloudsql-proxy"
-        - name: CLOUDSQL_DATABASE
-          value: "orchestrator"
-        - name: CLOUDSQL_USERNAME
-          valueFrom:
-            secretKeyRef:
-              name: orchestrator-secrets
-              key: cloudsql-username
-        - name: CLOUDSQL_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: orchestrator-secrets
-              key: cloudsql-password
-        - name: JAVA_OPTS
-          value: "-Xmx2g -Xms1g"
+          value: prod
+        - name: ORCHESTRATOR_MODE
+          value: prod
+        - name: HAZELCAST_MEMBERS
+          value: "hazelcast-0.hazelcast,hazelcast-1.hazelcast,hazelcast-2.hazelcast"
+        - name: GCS_EVENTS_PATH
+          value: "gs://my-bucket/orchestrator/events"
+        ports:
+        - containerPort: 8080
         resources:
           requests:
-            memory: "2Gi"
-            cpu: "1000m"
+            memory: 1Gi
+            cpu: 500m
           limits:
-            memory: "4Gi"
-            cpu: "2000m"
+            memory: 2Gi
+            cpu: 1000m
         livenessProbe:
           httpGet:
             path: /q/health/live
             port: 8080
-          initialDelaySeconds: 60
-          periodSeconds: 10
+          initialDelaySeconds: 30
         readinessProbe:
           httpGet:
             path: /q/health/ready
             port: 8080
-          initialDelaySeconds: 30
-          periodSeconds: 5
+          initialDelaySeconds: 10
         volumeMounts:
         - name: config
           mountPath: /config
@@ -2129,31 +1210,25 @@ spec:
       volumes:
       - name: config
         configMap:
-          name: workflow-definitions
+          name: workflow-config
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: orchestrator
   namespace: orchestrator
-  annotations:
-    prometheus.io/scrape: "true"
-    prometheus.io/port: "8080"
-    prometheus.io/path: "/q/metrics"
 spec:
+  type: LoadBalancer
   selector:
     app: orchestrator
   ports:
-  - port: 8080
+  - port: 80
     targetPort: 8080
-    name: http
-  type: LoadBalancer  # Or use Ingress
 ```
 
-#### Worker Deployment
+### Worker Deployment
 
 ```yaml
-# worker-deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -2161,11 +1236,6 @@ metadata:
   namespace: orchestrator
 spec:
   replicas: 2
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0  # Ensure no work is lost
   selector:
     matchLabels:
       app: worker
@@ -2177,39 +1247,25 @@ spec:
       serviceAccountName: worker-sa
       containers:
       - name: worker
-        image: gcr.io/<PROJECT_ID>/worker:latest
+        image: gcr.io/project/orchestrator-worker:latest
         env:
         - name: QUARKUS_PROFILE
-          value: "prod"
-        - name: GCP_PROJECT_ID
-          value: "<PROJECT_ID>"
+          value: prod
+        - name: WORKER_THREADS
+          value: "16"
         - name: WORKER_ID
           valueFrom:
             fieldRef:
               fieldPath: metadata.name
-        - name: POD_IP
-          valueFrom:
-            fieldRef:
-              fieldPath: status.podIP
-        - name: NODE_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: spec.nodeName
-        - name: JAVA_OPTS
-          value: "-Xmx1g -Xms512m"
+        - name: HAZELCAST_MEMBERS
+          value: "hazelcast-0.hazelcast,hazelcast-1.hazelcast,hazelcast-2.hazelcast"
         resources:
           requests:
-            memory: "1Gi"
-            cpu: "500m"
+            memory: 2Gi
+            cpu: 1000m
           limits:
-            memory: "2Gi"
-            cpu: "1000m"
-        livenessProbe:
-          httpGet:
-            path: /q/health/live
-            port: 8080
-          initialDelaySeconds: 30
-          periodSeconds: 10
+            memory: 4Gi
+            cpu: 2000m
         volumeMounts:
         - name: config
           mountPath: /config
@@ -2217,8 +1273,8 @@ spec:
       volumes:
       - name: config
         configMap:
-          name: workflow-definitions
-      terminationGracePeriodSeconds: 300  # Allow tasks to finish
+          name: workflow-config
+      terminationGracePeriodSeconds: 300  # Let tasks finish
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -2233,19 +1289,15 @@ spec:
   minReplicas: 2
   maxReplicas: 20
   metrics:
-  - type: External
-    external:
-      metric:
-        name: pubsub.googleapis.com|subscription|num_undelivered_messages
-        selector:
-          matchLabels:
-            resource.labels.subscription_id: orchestrator-work-sub
+  - type: Resource
+    resource:
+      name: cpu
       target:
-        type: AverageValue
-        averageValue: "30"  # Scale when >30 messages per worker
+        type: Utilization
+        averageUtilization: 70
   behavior:
     scaleDown:
-      stabilizationWindowSeconds: 300  # Wait 5min before scaling down
+      stabilizationWindowSeconds: 300
       policies:
       - type: Percent
         value: 50
@@ -2259,200 +1311,1071 @@ spec:
       - type: Pods
         value: 4
         periodSeconds: 15
-      selectPolicy: Max
 ```
 
-#### Service Accounts
+### ConfigMap
 
 ```yaml
-# service-accounts.yaml
 apiVersion: v1
-kind: ServiceAccount
+kind: ConfigMap
 metadata:
-  name: orchestrator-sa
+  name: workflow-config
   namespace: orchestrator
-  annotations:
-    iam.gke.io/gcp-service-account: orchestrator@<PROJECT_ID>.iam.gserviceaccount.com
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: worker-sa
-  namespace: orchestrator
-  annotations:
-    iam.gke.io/gcp-service-account: orchestrator-worker@<PROJECT_ID>.iam.gserviceaccount.com
+data:
+  # Tasks
+  load-market-data.yaml: |
+    name: load-market-data
+    global: true
+    key: "load_market_${params.batch_date}_${params.region}"
+    params:
+      batch_date:
+        type: string
+        required: true
+      region:
+        type: string
+        default: us
+    command: dbt
+    args:
+      - run
+      - --models
+      - +market_data
+    timeout: 600
+  
+  # Graphs
+  daily-etl.yaml: |
+    name: daily-etl
+    params:
+      batch_date:
+        type: string
+        default: "${date.today()}"
+    schedule: "0 2 * * *"
+    tasks:
+      - task: load-market-data
+        params:
+          batch_date: "${params.batch_date}"
 ```
 
-#### Ingress (Optional)
+### Updating Graphs in Production
 
-```yaml
-# ingress.yaml
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: orchestrator-ingress
-  namespace: orchestrator
-  annotations:
-    kubernetes.io/ingress.class: "gce"
-    cert-manager.io/cluster-issuer: "letsencrypt-prod"
-spec:
-  tls:
-  - hosts:
-    - orchestrator.example.com
-    secretName: orchestrator-tls
-  rules:
-  - host: orchestrator.example.com
-    http:
-      paths:
-      - path: /*
-        pathType: ImplementationSpecific
-        backend:
-          service:
-            name: orchestrator
-            port:
-              number: 8080
-```
-
-### GCP IAM Setup
-
-**Orchestrator Service Account** (`orchestrator@<PROJECT_ID>.iam.gserviceaccount.com`):
-- `cloudsql.client` - Connect to Cloud SQL
-- `pubsub.subscriber` - Subscribe to events and management topics
-- `logging.logWriter` - Write to Cloud Logging
-- `monitoring.metricWriter` - Write metrics
-
-**Worker Service Account** (`orchestrator-worker@<PROJECT_ID>.iam.gserviceaccount.com`):
-- `pubsub.subscriber` - Subscribe to work queue and management topic
-- `pubsub.publisher` - Publish task events
-- `bigquery.dataEditor` - Run BigQuery extracts
-- `dataflow.developer` - Launch Dataflow jobs
-- `dataplex.dataScannerRunner` - Run Dataplex scans
-- `storage.objectAdmin` - Read/write to GCS for task outputs
-- `logging.logWriter` - Write to Cloud Logging
-
-**Workload Identity Binding**:
-```bash
-gcloud iam service-accounts add-iam-policy-binding \
-    orchestrator@<PROJECT_ID>.iam.gserviceaccount.com \
-    --role roles/iam.workloadIdentityUser \
-    --member "serviceAccount:<PROJECT_ID>.svc.id.goog[orchestrator/orchestrator-sa]"
-
-gcloud iam service-accounts add-iam-policy-binding \
-    orchestrator-worker@<PROJECT_ID>.iam.gserviceaccount.com \
-    --role roles/iam.workloadIdentityUser \
-    --member "serviceAccount:<PROJECT_ID>.svc.id.goog[orchestrator/worker-sa]"
-```
-
-### Pub/Sub Topics and Subscriptions
+**Process**:
+1. Edit YAML files locally or in Git
+2. Update ConfigMap
+3. Restart orchestrator pod to reload config
 
 ```bash
-# Create topics
-gcloud pubsub topics create orchestrator-work
-gcloud pubsub topics create orchestrator-events
-gcloud pubsub topics create orchestrator-management
+# Update ConfigMap from directory
+kubectl create configmap workflow-config \
+  --from-file=graphs/ \
+  --from-file=tasks/ \
+  --dry-run=client -o yaml | kubectl apply -f -
 
-# Create subscriptions
-gcloud pubsub subscriptions create orchestrator-work-sub \
-    --topic=orchestrator-work \
-    --ack-deadline=600 \
-    --message-retention-duration=1h \
-    --max-delivery-attempts=3
-
-gcloud pubsub subscriptions create orchestrator-events-sub \
-    --topic=orchestrator-events \
-    --ack-deadline=60 \
-    --message-retention-duration=1h
-
-gcloud pubsub subscriptions create orchestrator-management-sub \
-    --topic=orchestrator-management \
-    --ack-deadline=60 \
-    --message-retention-duration=10m
-```
-
-### Deployment Process
-
-**Step 1: Build Images**
-```bash
-# Orchestrator
-cd orchestrator
-./mvnw clean package -Pnative
-docker build -f src/main/docker/Dockerfile.jvm -t gcr.io/<PROJECT_ID>/orchestrator:latest .
-docker push gcr.io/<PROJECT_ID>/orchestrator:latest
-
-# Worker
-cd ../worker
-./mvnw clean package -Pnative
-docker build -f src/main/docker/Dockerfile.jvm -t gcr.io/<PROJECT_ID>/worker:latest .
-docker push gcr.io/<PROJECT_ID>/worker:latest
-```
-
-**Step 2: Apply Kubernetes Manifests**
-```bash
-kubectl apply -f k8s/namespace.yaml
-kubectl apply -f k8s/secrets.yaml
-kubectl apply -f k8s/service-accounts.yaml
-kubectl apply -f k8s/configmap.yaml
-kubectl apply -f k8s/cloudsql-proxy.yaml
-kubectl apply -f k8s/orchestrator-deployment.yaml
-kubectl apply -f k8s/worker-deployment.yaml
-kubectl apply -f k8s/ingress.yaml
-```
-
-**Step 3: Verify Deployment**
-```bash
-kubectl get pods -n orchestrator
-kubectl logs -n orchestrator deployment/orchestrator
-kubectl logs -n orchestrator deployment/workers
-```
-
-**Step 4: Run Migrations**
-Migrations run automatically on orchestrator startup via Flyway.
-
-### Updating Graph Definitions
-
-To update graphs without redeploying:
-
-1. Update ConfigMap:
-```bash
-kubectl edit configmap workflow-definitions -n orchestrator
-```
-
-2. Recreate pods to pick up changes:
-```bash
+# Restart orchestrator to reload
 kubectl rollout restart deployment/orchestrator -n orchestrator
-kubectl rollout restart deployment/workers -n orchestrator
+
+# Wait for restart
+kubectl rollout status deployment/orchestrator -n orchestrator
 ```
 
-Note: This causes brief downtime. In-flight executions will resume when pods restart.
+**CI/CD Integration**:
+```yaml
+# .github/workflows/deploy-workflows.yml
+name: Deploy Workflows
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'graphs/**'
+      - 'tasks/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v1
+      
+      - name: Get GKE credentials
+        run: |
+          gcloud container clusters get-credentials orchestrator \
+            --region us-central1 --project my-project
+      
+      - name: Update ConfigMap
+        run: |
+          kubectl create configmap workflow-config \
+            --from-file=graphs/ \
+            --from-file=tasks/ \
+            --dry-run=client -o yaml | kubectl apply -f -
+      
+      - name: Restart Orchestrator
+        run: |
+          kubectl rollout restart deployment/orchestrator -n orchestrator
+          kubectl rollout status deployment/orchestrator -n orchestrator
+```
+
+---
+
+## UI Design
+
+### Technology Stack
+
+- **Framework**: Qute (Quarkus templating)
+- **CSS**: Tabler.io (MIT license, comprehensive UI kit)
+- **Icons**: Tabler Icons
+- **Charts**: Chart.js
+- **DAG Visualization**: dagre-d3
+- **Gantt Charts**: vis-timeline
+- **Editor**: Monaco Editor (VS Code)
+- **Interactivity**: Vanilla JavaScript + Server-Sent Events (SSE)
+
+### Page Structure
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Orchestrator                              [User] [Settings] │
+├─────┬───────────────────────────────────────────────────────┤
+│     │                                                       │
+│ Nav │  Page Content                                         │
+│     │                                                       │
+│     │                                                       │
+│Dash │                                                       │
+│     │                                                       │
+│     │                                                       │
+│Grph │                                                       │
+│     │                                                       │
+│     │                                                       │
+│Task │                                                       │
+│     │                                                       │
+│     │                                                       │
+│Wrkr │                                                       │
+│     │                                                       │
+│     │                                                       │
+│Evnt │                                                       │
+│     │                                                       │
+│     │                                                       │
+│Sett │                                                       │
+│     │                                                       │
+└─────┴───────────────────────────────────────────────────────┘
+```
+
+### Key Pages
+
+#### 1. Dashboard (`/`)
+
+**Purpose**: Overview of system health and recent activity
+
+**Content**:
+- Stats cards: Active graphs, queued tasks, active workers, success rate
+- Recent executions table
+- Active graphs list with status
+- System health indicators
+
+#### 2. Graphs List (`/graphs`)
+
+**Purpose**: Browse all available graphs
+
+**Content**:
+- Searchable/filterable table
+- Columns: Name, Description, Last Run, Status, Actions
+- Actions: Execute, View, History
+
+#### 3. Graph Detail (`/graphs/{id}`)
+
+**Purpose**: View graph execution in real-time
+
+**Tabs**:
+1. **Topology** - DAG visualization with color-coded nodes
+2. **Tasks** - Table of all tasks with status, duration, logs link
+3. **Gantt** - Timeline view of execution
+4. **Logs** - Aggregated logs from all tasks
+
+**Actions**:
+- Execute (with param form)
+- Pause/Resume
+- View History
+
+#### 4. Graph History (`/graphs/{id}/history`)
+
+**Purpose**: View past executions
+
+**Content**:
+- Table of executions with filters (date range, status)
+- Click to view specific execution
+
+#### 5. Global Tasks (`/tasks`)
+
+**Purpose**: View all global tasks and their current state
+
+**Content**:
+- Table of global tasks
+- Active executions (which graphs are using them)
+- Recent completions
+
+#### 6. Workers (`/workers`)
+
+**Purpose**: Monitor worker health and utilization
+
+**Content**:
+- Table of workers with status, threads, active tasks
+- Worker metrics (CPU, memory if available)
+- Heartbeat indicators
+
+#### 7. Events (`/events`)
+
+**Purpose**: View event log
+
+**Content**:
+- Searchable/filterable event stream
+- Real-time updates
+- Download events as JSONL
+
+#### 8. Editor (`/editor`) [Dev Only]
+
+**Purpose**: Edit graphs and tasks in browser
+
+**Content**:
+- File tree (graphs, tasks)
+- Monaco editor with YAML syntax highlighting
+- Save to file
+- Validation
+
+#### 9. Settings (`/settings`)
+
+**Purpose**: System configuration
+
+**Content**:
+- Nuclear options (restart, hard reset)
+- System info
+- Configuration display
+
+### Real-Time Updates
+
+Use Server-Sent Events (SSE) for live updates:
+
+```java
+@Path("/api/stream")
+public class StreamController {
+    @Inject
+    EventBus eventBus;
+    
+    @GET
+    @Path("/graphs/{id}")
+    @Produces(MediaType.SERVER_SENT_EVENTS)
+    public Multi<GraphEvent> streamGraphEvents(@PathParam("id") UUID graphId) {
+        return Multi.createFrom().emitter(emitter -> {
+            Consumer<Message<Object>> handler = msg -> {
+                GraphEvent event = convertToGraphEvent(msg.body());
+                emitter.emit(event);
+            };
+            
+            MessageConsumer<Object> consumer = eventBus.consumer("graph." + graphId);
+            consumer.handler(handler);
+            
+            emitter.onTermination(() -> consumer.unregister());
+        });
+    }
+}
+```
+
+```javascript
+// Client-side
+const eventSource = new EventSource('/api/stream/graphs/123');
+
+eventSource.addEventListener('task-status', (event) => {
+  const data = JSON.parse(event.data);
+  updateTaskRow(data.taskId, data.status);
+});
+
+eventSource.addEventListener('graph-status', (event) => {
+  const data = JSON.parse(event.data);
+  updateGraphStatus(data.status);
+});
+```
+
+---
+
+## Data Model
+
+### In-Memory State (Hazelcast)
+
+#### Maps
+
+```java
+// Graph definitions (loaded from YAML)
+IMap<String, Graph> graphDefinitions;
+
+// Task definitions (loaded from YAML)
+IMap<String, Task> taskDefinitions;
+
+// Graph executions (current state)
+IMap<UUID, GraphExecution> graphExecutions;
+
+// Task executions (current state)
+IMap<UUID, TaskExecution> taskExecutions;
+
+// Global task executions (deduplicated)
+IMap<TaskExecutionKey, GlobalTaskExecution> globalTasks;
+
+// Worker registry
+IMap<String, Worker> workers;
+```
+
+#### Queues
+
+```java
+// Work queue (tasks waiting for workers)
+IQueue<WorkMessage> workQueue;
+```
+
+### Event Log (JSONL Files)
+
+**File Structure**:
+```
+events/
+├── 2025-10-15.jsonl
+├── 2025-10-16.jsonl
+└── 2025-10-17.jsonl
+```
+
+**Event Types**:
+```json
+{"event_type":"GRAPH_STARTED","timestamp":"2025-10-17T10:00:00Z","graph_execution_id":"uuid","graph_name":"daily-etl","triggered_by":"schedule","params":{"batch_date":"2025-10-17"}}
+
+{"event_type":"TASK_QUEUED","timestamp":"2025-10-17T10:00:01Z","task_execution_id":"uuid","task_name":"load-data","graph_execution_id":"uuid"}
+
+{"event_type":"TASK_STARTED","timestamp":"2025-10-17T10:00:05Z","task_execution_id":"uuid","worker_id":"worker-1","thread":"worker-1-thread-3"}
+
+{"event_type":"TASK_COMPLETED","timestamp":"2025-10-17T10:05:00Z","task_execution_id":"uuid","duration_seconds":295,"result":{"rows_loaded":150000}}
+
+{"event_type":"TASK_FAILED","timestamp":"2025-10-17T10:05:00Z","task_execution_id":"uuid","error":"Connection timeout","attempt":1}
+
+{"event_type":"GRAPH_COMPLETED","timestamp":"2025-10-17T10:30:00Z","graph_execution_id":"uuid","status":"COMPLETED","duration_seconds":1800}
+
+{"event_type":"GLOBAL_TASK_STARTED","timestamp":"2025-10-17T10:00:00Z","task_name":"load-market-data","resolved_key":"load_market_2025-10-17_us","params":{"batch_date":"2025-10-17","region":"us"},"initiated_by_graph":"uuid"}
+
+{"event_type":"GLOBAL_TASK_LINKED","timestamp":"2025-10-17T10:05:00Z","resolved_key":"load_market_2025-10-17_us","linked_graph":"uuid"}
+
+{"event_type":"GLOBAL_TASK_COMPLETED","timestamp":"2025-10-17T10:15:00Z","resolved_key":"load_market_2025-10-17_us","result":{"rows":1500000}}
+
+{"event_type":"WORKER_HEARTBEAT","timestamp":"2025-10-17T10:00:00Z","worker_id":"worker-1","active_threads":3,"total_threads":16}
+
+{"event_type":"WORKER_DIED","timestamp":"2025-10-17T10:00:00Z","worker_id":"worker-2"}
+
+{"event_type":"CLUSTER_RESTART","timestamp":"2025-10-17T10:00:00Z","initiated_by":"admin@company.com"}
+
+{"event_type":"CLUSTER_RESET","timestamp":"2025-10-17T10:00:00Z","initiated_by":"admin@company.com"}
+```
+
+### Recovery on Startup
+
+```java
+@ApplicationScoped
+public class StateRecoveryService {
+    void onStart(@Observes StartupEvent event) {
+        // Find last checkpoint or reset event
+        Instant recoverySince = findRecoveryPoint();
+        
+        // Read events since recovery point
+        Stream<Event> events = eventStore.readSince(recoverySince);
+        
+        // Replay events to rebuild state
+        events.forEach(this::replayEvent);
+        
+        // Clean up stale state
+        cleanupStaleExecutions();
+    }
+    
+    private Instant findRecoveryPoint() {
+        // Look for CLUSTER_RESET events
+        Optional<Event> reset = eventStore.findLastEvent("CLUSTER_RESET");
+        if (reset.isPresent()) {
+            return reset.get().timestamp();
+        }
+        
+        // Default: recover last 24 hours
+        return Instant.now().minus(24, ChronoUnit.HOURS);
+    }
+}
+```
+
+---
+
+## Implementation Details
+
+### Core Components
+
+#### 1. Graph Loader
+
+```java
+@ApplicationScoped
+public class GraphLoader {
+    @Inject
+    ExpressionEvaluator expressionEvaluator;
+    @Inject
+    GraphValidator graphValidator;
+    @Inject
+    HazelcastInstance hazelcast;
+    
+    @ConfigProperty(name = "orchestrator.config.graphs")
+    String graphsPath;
+    
+    @ConfigProperty(name = "orchestrator.config.tasks")
+    String tasksPath;
+    
+    private IMap<String, Graph> graphDefinitions;
+    private IMap<String, Task> taskDefinitions;
+    
+    void onStart(@Observes StartupEvent event) {
+        graphDefinitions = hazelcast.getMap("graph-definitions");
+        taskDefinitions = hazelcast.getMap("task-definitions");
+        
+        loadTasks();
+        loadGraphs();
+    }
+    
+    private void loadTasks() {
+        try (Stream<Path> paths = Files.walk(Path.of(tasksPath))) {
+            paths.filter(p -> p.toString().endsWith(".yaml"))
+                 .forEach(this::loadTask);
+        }
+    }
+    
+    private void loadTask(Path path) {
+        String yaml = Files.readString(path);
+        Task task = parseTask(yaml);
+        
+        // Validate
+        validator.validateTask(task);
+        
+        // Store
+        taskDefinitions.put(task.name(), task);
+        
+        logger.info("Loaded task: {}", task.name());
+    }
+    
+    private void loadGraphs() {
+        try (Stream<Path> paths = Files.walk(Path.of(graphsPath))) {
+            paths.filter(p -> p.toString().endsWith(".yaml"))
+                 .forEach(this::loadGraph);
+        }
+    }
+    
+    private void loadGraph(Path path) {
+        String yaml = Files.readString(path);
+        Graph graph = parseGraph(yaml);
+        
+        // Validate
+        graphValidator.validateGraph(graph);
+        
+        // Store
+        graphDefinitions.put(graph.name(), graph);
+        
+        logger.info("Loaded graph: {} ({} tasks)", 
+            graph.name(), graph.tasks().size());
+    }
+}
+```
+
+#### 2. Graph Evaluator
+
+```java
+@ApplicationScoped
+public class GraphEvaluator {
+    @Inject
+    EventBus eventBus;
+    @Inject
+    JGraphTService jGraphTService;
+    @Inject
+    HazelcastInstance hazelcast;
+    
+    private IMap<UUID, GraphExecution> graphExecutions;
+    private IMap<UUID, TaskExecution> taskExecutions;
+    private IMap<TaskExecutionKey, GlobalTaskExecution> globalTasks;
+    
+    @PostConstruct
+    void init() {
+        graphExecutions = hazelcast.getMap("graph-executions");
+        taskExecutions = hazelcast.getMap("task-executions");
+        globalTasks = hazelcast.getMap("global-tasks");
+    }
+    
+    @ConsumeEvent("task.completed")
+    @ConsumeEvent("task.failed")
+    public void onTaskStatusChange(TaskEvent event) {
+        // Update task execution
+        TaskExecution te = taskExecutions.get(event.executionId());
+        te = te.withStatus(event.status());
+        taskExecutions.put(event.executionId(), te);
+        
+        // Find graph execution(s) to re-evaluate
+        if (te.isGlobal()) {
+            // Global task - notify all linked graphs
+            GlobalTaskExecution gte = globalTasks.get(te.globalKey());
+            gte.linkedGraphExecutions().forEach(graphExecId -> 
+                eventBus.publish("graph.evaluate", graphExecId)
+            );
+        } else {
+            // Regular task - notify its graph
+            eventBus.publish("graph.evaluate", te.graphExecutionId());
+        }
+    }
+    
+    @ConsumeEvent("graph.evaluate")
+    public void evaluate(UUID graphExecutionId) {
+        GraphExecution exec = graphExecutions.get(graphExecutionId);
+        
+        // Build DAG
+        DirectedAcyclicGraph<TaskNode, DefaultEdge> dag = 
+            jGraphTService.buildDAG(exec.graph());
+        
+        // Get current state
+        Map<TaskNode, TaskStatus> state = getCurrentState(graphExecutionId);
+        
+        // Find ready tasks
+        Set<TaskNode> ready = jGraphTService.findReadyTasks(dag, state);
+        
+        // Schedule each ready task
+        ready.forEach(task -> scheduleTask(graphExecutionId, task));
+        
+        // Update graph status
+        updateGraphStatus(graphExecutionId, state);
+    }
+    
+    private void scheduleTask(UUID graphExecutionId, TaskNode node) {
+        if (node.isGlobal()) {
+            scheduleGlobalTask(graphExecutionId, node);
+        } else {
+            scheduleRegularTask(graphExecutionId, node);
+        }
+    }
+}
+```
+
+#### 3. Worker Pool
+
+```java
+@ApplicationScoped
+public class WorkerPool {
+    @Inject
+    HazelcastInstance hazelcast;
+    @Inject
+    TaskExecutor taskExecutor;
+    @Inject
+    EventLogger eventLogger;
+    
+    @ConfigProperty(name = "worker.threads")
+    int workerThreads;
+    
+    @ConfigProperty(name = "worker.id")
+    String workerId;
+    
+    private IQueue<WorkMessage> workQueue;
+    private ExecutorService executorService;
+    private volatile boolean running = false;
+    
+    @PostConstruct
+    void init() {
+        workQueue = hazelcast.getQueue("work-queue");
+    }
+    
+    public void start(int threads) {
+        this.workerThreads = threads;
+        this.running = true;
+        
+        // Create thread pool
+        this.executorService = Executors.newFixedThreadPool(
+            workerThreads,
+            new ThreadFactory() {
+                private final AtomicInteger counter = new AtomicInteger(0);
+                
+                @Override
+                public Thread newThread(Runnable r) {
+                    Thread t = new Thread(r);
+                    t.setName(workerId + "-thread-" + counter.incrementAndGet());
+                    return t;
+                }
+            }
+        );
+        
+        // Start worker threads
+        for (int i = 0; i < workerThreads; i++) {
+            executorService.submit(this::workerLoop);
+        }
+        
+        // Start heartbeat
+        startHeartbeat();
+        
+        logger.info("Worker pool started: {} threads", workerThreads);
+    }
+    
+    private void workerLoop() {
+        String threadName = Thread.currentThread().getName();
+        
+        while (running) {
+            try {
+                // Pull work (blocking with timeout)
+                WorkMessage work = workQueue.poll(5, TimeUnit.SECONDS);
+                
+                if (work == null) {
+                    continue;  // Timeout, try again
+                }
+                
+                executeWork(work, threadName);
+                
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            } catch (Exception e) {
+                logger.error("[{}] Error in worker loop", threadName, e);
+            }
+        }
+    }
+    
+    private void executeWork(WorkMessage work, String threadName) {
+        logger.info("[{}] Executing: {}", threadName, work.taskName());
+        
+        eventLogger.logTaskStarted(work.executionId(), workerId, threadName);
+        
+        Instant start = Instant.now();
+        
+        try {
+            TaskResult result = taskExecutor.execute(work);
+            Duration duration = Duration.between(start, Instant.now());
+            
+            if (result.isSuccess()) {
+                logger.info("[{}] Completed: {} ({})", 
+                    threadName, work.taskName(), duration);
+                
+                eventLogger.logTaskCompleted(
+                    work.executionId(), result.data(), duration);
+            } else {
+                logger.error("[{}] Failed: {}", threadName, work.taskName());
+                
+                eventLogger.logTaskFailed(
+                    work.executionId(), result.error(), work.attempt());
+            }
+            
+        } catch (Exception e) {
+            logger.error("[{}] Exception: {}", threadName, work.taskName(), e);
+            
+            eventLogger.logTaskFailed(
+                work.executionId(), e.getMessage(), work.attempt());
+        }
+    }
+}
+```
+
+#### 4. Task Executor
+
+```java
+@ApplicationScoped
+public class TaskExecutor {
+    @ConfigProperty(name = "orchestrator.dev.trial-run")
+    boolean trialRun;
+    
+    @Inject
+    ExpressionEvaluator expressionEvaluator;
+    
+    public TaskResult execute(WorkMessage work) {
+        // Evaluate all expressions
+        String command = expressionEvaluator.evaluate(
+            work.command(), work.context());
+        
+        List<String> args = work.args().stream()
+            .map(arg -> expressionEvaluator.evaluate(arg, work.context()))
+            .toList();
+        
+        Map<String, String> env = work.env().entrySet().stream()
+            .collect(Collectors.toMap(
+                Map.Entry::getKey,
+                e -> expressionEvaluator.evaluate(e.getValue(), work.context())
+            ));
+        
+        // Build full command
+        List<String> fullCommand = new ArrayList<>();
+        fullCommand.add(command);
+        fullCommand.addAll(args);
+        
+        // Trial run mode
+        if (trialRun) {
+            return executeTrialRun(fullCommand, env, work);
+        }
+        
+        // Real execution
+        return executeCommand(fullCommand, env, work);
+    }
+    
+    private TaskResult executeTrialRun(
+        List<String> command, 
+        Map<String, String> env,
+        WorkMessage work
+    ) {
+        String commandStr = String.join(" ", command);
+        
+        logger.info("═══════════════════════════════════════");
+        logger.info("TRIAL RUN - Would execute:");
+        logger.info("  Command: {}", commandStr);
+        logger.info("  Timeout: {}s", work.timeoutSeconds());
+        logger.info("  Environment:");
+        env.forEach((k, v) -> logger.info("    {}={}", k, v));
+        logger.info("═══════════════════════════════════════");
+        
+        // Return fake success
+        return TaskResult.success(Map.of(
+            "trial_run", true,
+            "command", commandStr,
+            "would_timeout", work.timeoutSeconds()
+        ));
+    }
+    
+    private TaskResult executeCommand(
+        List<String> command,
+        Map<String, String> env,
+        WorkMessage work
+    ) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder(command);
+            
+            // Set environment
+            pb.environment().putAll(env);
+            
+            // Redirect stderr to stdout
+            pb.redirectErrorStream(true);
+            
+            // Start process
+            Process process = pb.start();
+            
+            // Capture output
+            StringBuilder output = new StringBuilder();
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    output.append(line).append("\n");
+                    logger.info("[TASK OUTPUT] {}", line);
+                }
+            }
+            
+            // Wait for completion with timeout
+            boolean completed = process.waitFor(
+                work.timeoutSeconds(), 
+                TimeUnit.SECONDS
+            );
+            
+            if (!completed) {
+                process.destroyForcibly();
+                return TaskResult.failure(
+                    "Task timed out after " + work.timeoutSeconds() + "s");
+            }
+            
+            int exitCode = process.exitValue();
+            
+            if (exitCode == 0) {
+                // Try to parse last line as JSON for downstream tasks
+                Map<String, Object> result = tryParseJsonOutput(
+                    output.toString());
+                
+                return TaskResult.success(result);
+            } else {
+                return TaskResult.failure(
+                    "Task exited with code " + exitCode + "\n" + 
+                    output.toString());
+            }
+            
+        } catch (IOException e) {
+            return TaskResult.failure(
+                "Failed to start process: " + e.getMessage());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return TaskResult.failure("Task interrupted");
+        }
+    }
+    
+    private Map<String, Object> tryParseJsonOutput(String output) {
+        try {
+            String[] lines = output.split("\n");
+            if (lines.length == 0) {
+                return Map.of("output", output);
+            }
+            
+            String lastLine = lines[lines.length - 1].trim();
+            
+            if (lastLine.startsWith("{") && lastLine.endsWith("}")) {
+                ObjectMapper mapper = new ObjectMapper();
+                return mapper.readValue(lastLine, 
+                    new TypeReference<Map<String, Object>>() {});
+            }
+        } catch (Exception e) {
+            // Not JSON, that's fine
+        }
+        
+        return Map.of("output", output);
+    }
+}
+```
+
+#### 5. Event Store
+
+```java
+@ApplicationScoped
+public class EventStore {
+    @ConfigProperty(name = "orchestrator.storage.events")
+    String eventsPath;
+    
+    @Inject
+    StorageAdapter storageAdapter;
+    
+    private final DateTimeFormatter dateFormat = 
+        DateTimeFormatter.ofPattern("yyyy-MM-dd");
+    
+    public void append(Event event) {
+        String date = dateFormat.format(
+            LocalDate.ofInstant(event.timestamp(), ZoneOffset.UTC));
+        
+        String filename = date + ".jsonl";
+        String path = eventsPath + "/" + filename;
+        
+        String json = toJson(event) + "\n";
+        
+        storageAdapter.append(path, json);
+    }
+    
+    public Stream<Event> readSince(Instant since) {
+        LocalDate sinceDate = LocalDate.ofInstant(since, ZoneOffset.UTC);
+        LocalDate today = LocalDate.now();
+        
+        return sinceDate.datesUntil(today.plusDays(1))
+            .flatMap(date -> {
+                String filename = dateFormat.format(date) + ".jsonl";
+                String path = eventsPath + "/" + filename;
+                
+                try {
+                    return storageAdapter.readLines(path)
+                        .map(this::parseEvent)
+                        .filter(e -> e.timestamp().isAfter(since));
+                } catch (IOException e) {
+                    logger.warn("Could not read events from {}", path);
+                    return Stream.empty();
+                }
+            });
+    }
+    
+    public Optional<Event> findLastEvent(String eventType) {
+        // Search backwards from today
+        LocalDate date = LocalDate.now();
+        
+        for (int i = 0; i < 30; i++) {  // Search last 30 days
+            String filename = dateFormat.format(date) + ".jsonl";
+            String path = eventsPath + "/" + filename;
+            
+            try {
+                List<Event> events = storageAdapter.readLines(path)
+                    .map(this::parseEvent)
+                    .filter(e -> e.eventType().equals(eventType))
+                    .toList();
+                
+                if (!events.isEmpty()) {
+                    return Optional.of(events.get(events.size() - 1));
+                }
+            } catch (IOException e) {
+                // File doesn't exist, continue
+            }
+            
+            date = date.minusDays(1);
+        }
+        
+        return Optional.empty();
+    }
+    
+    private String toJson(Event event) {
+        try {
+            ObjectMapper mapper = new ObjectMapper();
+            return mapper.writeValueAsString(event);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException("Failed to serialize event", e);
+        }
+    }
+    
+    private Event parseEvent(String json) {
+        try {
+            ObjectMapper mapper = new ObjectMapper();
+            return mapper.readValue(json, Event.class);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException("Failed to parse event", e);
+        }
+    }
+}
+```
+
+#### 6. Storage Adapter
+
+```java
+public interface StorageAdapter {
+    void append(String path, String content);
+    Stream<String> readLines(String path) throws IOException;
+}
+
+@ApplicationScoped
+public class StorageAdapterFactory {
+    public StorageAdapter create(String path) {
+        if (path.startsWith("gs://")) {
+            return new GcsStorageAdapter();
+        } else if (path.startsWith("s3://")) {
+            return new S3StorageAdapter();
+        } else if (path.startsWith("file://") || path.startsWith("./")) {
+            return new LocalFilesystemAdapter();
+        } else {
+            throw new IllegalArgumentException(
+                "Unsupported storage path: " + path);
+        }
+    }
+}
+
+@ApplicationScoped
+public class LocalFilesystemAdapter implements StorageAdapter {
+    @Override
+    public void append(String path, String content) {
+        Path filePath = Path.of(path.replace("file://", ""));
+        
+        // Create directory if needed
+        Files.createDirectories(filePath.getParent());
+        
+        // Append to file
+        Files.writeString(filePath, content, 
+            StandardOpenOption.CREATE, 
+            StandardOpenOption.APPEND);
+    }
+    
+    @Override
+    public Stream<String> readLines(String path) throws IOException {
+        Path filePath = Path.of(path.replace("file://", ""));
+        return Files.lines(filePath);
+    }
+}
+
+@ApplicationScoped
+public class GcsStorageAdapter implements StorageAdapter {
+    @Inject
+    Storage storage;
+    
+    @Override
+    public void append(String path, String content) {
+        // Parse gs://bucket/path
+        String pathWithoutScheme = path.substring("gs://".length());
+        String[] parts = pathWithoutScheme.split("/", 2);
+        String bucket = parts[0];
+        String objectPath = parts[1];
+        
+        BlobId blobId = BlobId.of(bucket, objectPath);
+        BlobInfo blobInfo = BlobInfo.newBuilder(blobId).build();
+        
+        // Check if exists
+        Blob blob = storage.get(blobId);
+        
+        if (blob != null) {
+            // Append to existing
+            byte[] existing = blob.getContent();
+            byte[] combined = concat(existing, content.getBytes());
+            storage.create(blobInfo, combined);
+        } else {
+            // Create new
+            storage.create(blobInfo, content.getBytes());
+        }
+    }
+    
+    @Override
+    public Stream<String> readLines(String path) throws IOException {
+        String pathWithoutScheme = path.substring("gs://".length());
+        String[] parts = pathWithoutScheme.split("/", 2);
+        String bucket = parts[0];
+        String objectPath = parts[1];
+        
+        BlobId blobId = BlobId.of(bucket, objectPath);
+        Blob blob = storage.get(blobId);
+        
+        if (blob == null) {
+            throw new FileNotFoundException(path);
+        }
+        
+        String content = new String(blob.getContent());
+        return content.lines();
+    }
+}
+```
+
+---
 
 ## Testing Strategy
 
 ### Unit Tests
 
-**Repository Tests** (using Testcontainers):
+**Repository Tests**:
 ```java
 @QuarkusTest
-@TestProfile(PostgresTestProfile.class)
-class TaskRepositoryTest {
-    @Inject TaskRepository taskRepo;
+class GraphRepositoryTest {
+    @Inject
+    GraphRepository graphRepo;
     
     @Test
-    void shouldCreateAndFindTask() {
-        Task task = new Task(
-            UUID.randomUUID(),
-            "test-task",
-            TaskType.DBT,
-            Map.of("project", "test"),
-            new RetryPolicy(3, "exponential", 30, null),
-            600,
-            false
+    void shouldLoadGraphFromYaml() {
+        String yaml = """
+            name: test-graph
+            tasks:
+              - name: task1
+                command: echo
+                args:
+                  - hello
+            """;
+        
+        Graph graph = graphRepo.parseYaml(yaml);
+        
+        assertThat(graph.name()).isEqualTo("test-graph");
+        assertThat(graph.tasks()).hasSize(1);
+    }
+}
+```
+
+**Expression Evaluator Tests**:
+```java
+@QuarkusTest
+class ExpressionEvaluatorTest {
+    @Inject
+    ExpressionEvaluator evaluator;
+    
+    @Test
+    void shouldEvaluateSimpleExpression() {
+        Context ctx = new Context(
+            Map.of("region", "us"),
+            Map.of(),
+            Map.of()
         );
         
-        Task saved = taskRepo.save(task);
-        Optional<Task> found = taskRepo.findByName("test-task");
+        String result = evaluator.evaluate("${params.region}", ctx);
         
-        assertThat(found).isPresent();
-        assertThat(found.get().name()).isEqualTo("test-task");
+        assertThat(result).isEqualTo("us");
+    }
+    
+    @Test
+    void shouldEvaluateConditional() {
+        Context ctx = new Context(
+            Map.of("env", "prod"),
+            Map.of(),
+            Map.of()
+        );
+        
+        String result = evaluator.evaluate(
+            "${params.env == 'prod' ? 'production' : 'development'}", 
+            ctx
+        );
+        
+        assertThat(result).isEqualTo("production");
     }
 }
 ```
@@ -2461,7 +2384,8 @@ class TaskRepositoryTest {
 ```java
 @QuarkusTest
 class JGraphTServiceTest {
-    @Inject JGraphTService jGraphTService;
+    @Inject
+    JGraphTService jGraphTService;
     
     @Test
     void shouldDetectCycle() {
@@ -2473,2826 +2397,604 @@ class JGraphTServiceTest {
     
     @Test
     void shouldFindReadyTasks() {
-        Graph graph = createLinearGraph();  // A -> B -> C
-        DirectedAcyclicGraph<Task, DefaultEdge> dag = jGraphTService.buildDAG(graph);
+        // A -> B -> C
+        Graph graph = createLinearGraph();
+        DirectedAcyclicGraph<TaskNode, DefaultEdge> dag = 
+            jGraphTService.buildDAG(graph);
         
-        Map<Task, TaskStatus> states = Map.of(
+        Map<TaskNode, TaskStatus> state = Map.of(
             taskA, TaskStatus.COMPLETED,
             taskB, TaskStatus.PENDING,
             taskC, TaskStatus.PENDING
         );
         
-        Set<Task> ready = jGraphTService.findReadyTasks(dag, states);
+        Set<TaskNode> ready = jGraphTService.findReadyTasks(dag, state);
         
         assertThat(ready).containsOnly(taskB);
     }
 }
 ```
 
-**Graph Evaluator Tests**:
-```java
-@QuarkusTest
-class GraphEvaluatorTest {
-    @Inject GraphEvaluator evaluator;
-    @Inject EventBus eventBus;
-    
-    @Test
-    void shouldScheduleReadyTasks() {
-        List<TaskReadyEvent> published = new ArrayList<>();
-        eventBus.consumer("task.ready", msg -> {
-            published.add(msg.body());
-        });
-        
-        UUID graphExecId = setupGraphExecution();  // A (completed) -> B, C
-        
-        evaluator.evaluate(graphExecId);
-        
-        assertThat(published).hasSize(2);  // B and C are ready
-    }
-}
-```
-
 ### Integration Tests
 
-**Full Flow Test** (using Testcontainers + Hazelcast):
+**Full Graph Execution**:
 ```java
 @QuarkusTest
 @TestProfile(IntegrationTestProfile.class)
-class WorkflowIntegrationTest {
-    @Inject GraphRepository graphRepo;
-    @Inject GraphEvaluator evaluator;
-    @Inject QueueService queueService;
+class GraphExecutionIntegrationTest {
+    @Inject
+    GraphEvaluator evaluator;
+    @Inject
+    GraphRepository graphRepo;
+    @Inject
+    WorkerPool workerPool;
+    
+    @BeforeEach
+    void setup() {
+        // Start embedded worker
+        workerPool.start(2);
+    }
     
     @Test
-    void shouldExecuteSimpleWorkflow() throws Exception {
-        // Load graph definition
-        Graph graph = loadGraphFromYaml("test-graphs/simple.yaml");
-        graphRepo.save(graph);
+    void shouldExecuteSimpleGraph() {
+        // Load test graph
+        Graph graph = graphRepo.loadFromFile("test-graphs/simple.yaml");
         
         // Create execution
-        GraphExecution execution = graphExecRepo.create(
+        GraphExecution exec = graphExecRepo.create(
             graph.id(),
-            "integration-test"
+            Map.of("date", "2025-10-17"),
+            "test"
         );
         
         // Trigger evaluation
-        evaluator.evaluate(execution.id());
+        evaluator.evaluate(exec.id());
         
-        // Wait for completion (with timeout)
+        // Wait for completion
         await().atMost(30, SECONDS).until(() -> {
-            GraphExecution updated = graphExecRepo.findById(execution.id());
+            GraphExecution updated = graphExecRepo.findById(exec.id());
             return updated.status() == GraphStatus.COMPLETED;
         });
         
         // Verify all tasks completed
-        List<TaskExecution> tasks = taskExecRepo.findByGraphExecution(execution.id());
-        assertThat(tasks).allMatch(te -> te.status() == TaskStatus.COMPLETED);
+        List<TaskExecution> tasks = 
+            taskExecRepo.findByGraphExecution(exec.id());
+        
+        assertThat(tasks).allMatch(te -> 
+            te.status() == TaskStatus.COMPLETED);
     }
-}
-```
-
-**Global Task Test**:
-```java
-@Test
-void shouldShareGlobalTaskAcrossGraphs() {
-    // Create two graphs that both use global task
-    Graph graph1 = loadGraphFromYaml("test-graphs/with-global-1.yaml");
-    Graph graph2 = loadGraphFromYaml("test-graphs/with-global-2.yaml");
-    
-    graphRepo.save(graph1);
-    graphRepo.save(graph2);
-    
-    // Start both executions
-    GraphExecution exec1 = graphExecRepo.create(graph1.id(), "test");
-    GraphExecution exec2 = graphExecRepo.create(graph2.id(), "test");
-    
-    evaluator.evaluate(exec1.id());
-    evaluator.evaluate(exec2.id());
-    
-    // Wait for global task to complete
-    await().atMost(10, SECONDS).until(() -> {
-        List<TaskExecution> globalExecs = 
-            taskExecRepo.findGlobalExecutions("load-market-data");
-        return globalExecs.stream()
-            .anyMatch(te -> te.status() == TaskStatus.COMPLETED);
-    });
-    
-    // Verify only ONE global task execution occurred
-    List<TaskExecution> globalExecs = 
-        taskExecRepo.findGlobalExecutions("load-market-data");
-    assertThat(globalExecs).hasSize(1);
-    
-    // Verify both graph executions progressed
-    assertThat(taskExecRepo.findByGraphExecution(exec1.id()))
-        .anyMatch(te -> te.status() != TaskStatus.PENDING);
-    assertThat(taskExecRepo.findByGraphExecution(exec2.id()))
-        .anyMatch(te -> te.status() != TaskStatus.PENDING);
-}
-```
-
-### Chaos Engineering Tests
-
-**Worker Death Test**:
-```java
-@QuarkusTest
-@TestProfile(ChaosTestProfile.class)
-class WorkerFailureTest {
-    @Inject WorkerMonitor workerMonitor;
-    @Inject WorkRecoveryService workRecovery;
-    @Inject TaskExecutionRepository taskExecRepo;
     
     @Test
-    void shouldRecoverWorkFromDeadWorker() {
-        // Setup: worker starts executing task
-        String workerId = "test-worker-1";
-        UUID taskExecId = createTaskExecution();
+    void shouldHandleGlobalTaskDeduplication() {
+        // Create two graphs that use same global task
+        Graph graph1 = graphRepo.loadFromFile("test-graphs/with-global-1.yaml");
+        Graph graph2 = graphRepo.loadFromFile("test-graphs/with-global-2.yaml");
         
-        taskExecRepo.updateStatus(taskExecId, TaskStatus.RUNNING, null, null);
-        taskExecRepo.assignWorker(taskExecId, workerId);
+        Map<String, Object> params = Map.of("date", "2025-10-17");
         
-        // Worker sends heartbeat
-        workerRepo.upsert(new Worker(
-            workerId, 
-            WorkerStatus.ACTIVE,
-            Instant.now(),
-            Instant.now(),
-            Map.of()
-        ));
+        // Start both executions
+        GraphExecution exec1 = graphExecRepo.create(
+            graph1.id(), params, "test");
+        GraphExecution exec2 = graphExecRepo.create(
+            graph2.id(), params, "test");
         
-        // Simulate worker death (no more heartbeats)
-        // ... wait for dead threshold ...
-        Thread.sleep(65_000);
+        evaluator.evaluate(exec1.id());
+        evaluator.evaluate(exec2.id());
         
-        // Run monitor check
-        workerMonitor.checkDeadWorkers();
-        
-        // Verify worker marked dead
-        Worker worker = workerRepo.findById(workerId);
-        assertThat(worker.status()).isEqualTo(WorkerStatus.DEAD);
-        
-        // Verify task was recovered
-        await().atMost(5, SECONDS).until(() -> {
-            TaskExecution te = taskExecRepo.findById(taskExecId);
-            return te.status() == TaskStatus.PENDING;
+        // Wait for completion
+        await().atMost(30, SECONDS).until(() -> {
+            GraphExecution e1 = graphExecRepo.findById(exec1.id());
+            GraphExecution e2 = graphExecRepo.findById(exec2.id());
+            return e1.status() == GraphStatus.COMPLETED &&
+                   e2.status() == GraphStatus.COMPLETED;
         });
+        
+        // Verify only ONE global task execution occurred
+        List<GlobalTaskExecution> globalExecs = 
+            globalTaskRepo.findByResolvedKey("load_data_2025-10-17");
+        
+        assertThat(globalExecs).hasSize(1);
+        assertThat(globalExecs.get(0).linkedGraphExecutions())
+            .containsExactlyInAnyOrder(exec1.id(), exec2.id());
     }
 }
 ```
 
-**Database Connection Loss Test**:
-```java
-@Test
-void shouldHandleDatabaseUnavailability() {
-    // Stop database container
-    postgresContainer.stop();
-    
-    // Verify orchestrator stops accepting work
-    assertThatThrownBy(() -> evaluator.evaluate(UUID.randomUUID()))
-        .isInstanceOf(PersistenceException.class);
-    
-    // Restart database
-    postgresContainer.start();
-    
-    // Verify orchestrator recovers
-    UUID graphExecId = setupGraphExecution();
-    assertThatCode(() -> evaluator.evaluate(graphExecId))
-        .doesNotThrowAnyException();
-}
-```
-
-**Queue Unavailability Test**:
-```java
-@Test
-void shouldHandleQueueUnavailability() {
-    // Stop Hazelcast/Pub/Sub
-    queueService.shutdown();
-    
-    // Attempt to queue task
-    Uni<Void> result = queueService.publishWork(createWorkMessage());
-    
-    // Verify failure is handled
-    assertThatThrownBy(() -> result.await().indefinitely())
-        .isInstanceOf(Exception.class);
-    
-    // Restart queue
-    queueService.start();
-    
-    // Verify recovery
-    result = queueService.publishWork(createWorkMessage());
-    assertThatCode(() -> result.await().indefinitely())
-        .doesNotThrowAnyException();
-}
-```
-
-**Concurrent Evaluation Test**:
-```java
-@Test
-void shouldHandleConcurrentGraphEvaluations() throws Exception {
-    UUID graphExecId = setupGraphExecution();
-    
-    // Trigger multiple concurrent evaluations
-    ExecutorService executor = Executors.newFixedThreadPool(10);
-    List<Future<?>> futures = new ArrayList<>();
-    
-    for (int i = 0; i < 10; i++) {
-        futures.add(executor.submit(() -> {
-            evaluator.evaluate(graphExecId);
-        }));
-    }
-    
-    // Wait for all to complete
-    for (Future<?> future : futures) {
-        future.get(10, TimeUnit.SECONDS);
-    }
-    
-    // Verify no duplicate task executions
-    List<TaskExecution> tasks = taskExecRepo.findByGraphExecution(graphExecId);
-    Map<UUID, Long> taskCounts = tasks.stream()
-        .collect(Collectors.groupingBy(
-            te -> te.task().id(),
-            Collectors.counting()
-        ));
-    
-    assertThat(taskCounts.values()).allMatch(count -> count == 1);
-}
-```
-
-### Load Tests
-
-**JMeter Test Plan**:
-```xml
-<!-- load-test.jmx -->
-<jmeterTestPlan version="1.2">
-  <hashTree>
-    <TestPlan>
-      <stringProp name="TestPlan.comments">Orchestrator Load Test</stringProp>
-      <boolProp name="TestPlan.functional_mode">false</boolProp>
-    </TestPlan>
-    <hashTree>
-      <ThreadGroup>
-        <stringProp name="ThreadGroup.num_threads">100</stringProp>
-        <stringProp name="ThreadGroup.ramp_time">60</stringProp>
-        <stringProp name="ThreadGroup.duration">600</stringProp>
-      </ThreadGroup>
-      <hashTree>
-        <HTTPSamplerProxy>
-          <stringProp name="HTTPSampler.domain">orchestrator.example.com</stringProp>
-          <stringProp name="HTTPSampler.path">/api/graphs/${graphId}/execute</stringProp>
-          <stringProp name="HTTPSampler.method">POST</stringProp>
-        </HTTPSamplerProxy>
-      </hashTree>
-    </hashTree>
-  </hashTree>
-</jmeterTestPlan>
-```
-
-**Load Test Scenarios**:
-1. **Steady State**: 100 concurrent graph executions, each with 10 tasks
-2. **Burst**: Spike from 10 to 1000 executions over 1 minute
-3. **Long Duration**: 24-hour test with 50 constant executions
-4. **Worker Scaling**: Verify HPA scales workers appropriately
-
-**Performance Targets**:
-- Graph evaluation latency: p50 < 100ms, p99 < 500ms
-- Task queuing latency: p50 < 50ms, p99 < 200ms
-- Worker task pickup: < 1s from queue to execution
-- Database queries: all < 100ms
-- End-to-end graph execution: proportional to actual task duration (minimal overhead)
-
-### Contract Tests
-
-**Message Format Tests**:
+**Trial Run Test**:
 ```java
 @QuarkusTest
-class MessageContractTest {
+@TestProfile(TrialRunTestProfile.class)
+class TrialRunTest {
+    @Inject
+    TaskExecutor taskExecutor;
+    
     @Test
-    void workMessageShouldMatchContract() {
-        WorkMessage msg = new WorkMessage(
+    void shouldLogCommandWithoutExecuting() {
+        WorkMessage work = new WorkMessage(
             UUID.randomUUID(),
             "test-task",
-            TaskType.DBT,
-            Map.of("project", "test"),
-            new RetryPolicy(3, "exponential", 30, null),
+            "python",
+            List.of("script.py", "--dangerous"),
+            Map.of("API_KEY", "secret"),
             600
         );
         
-        String json = toJson(msg);
+        TaskResult result = taskExecutor.execute(work);
         
-        // Verify structure
-        JsonAssert.assertThat(json)
-            .node("executionId").isPresent()
-            .node("taskName").isEqualTo("test-task")
-            .node("taskType").isEqualTo("dbt")
-            .node("config.project").isEqualTo("test")
-            .node("retryPolicy.maxRetries").isEqualTo(3)
-            .node("timeoutSeconds").isEqualTo(600);
-    }
-    
-    @Test
-    void taskEventMessageShouldMatchContract() {
-        TaskEventMessage msg = new TaskEventMessage(
-            UUID.randomUUID(),
-            "test-task",
-            "COMPLETED",
-            "worker-1",
-            Instant.now(),
-            1L,
-            Map.of("result", "success"),
-            null
-        );
+        // Should succeed without actually running
+        assertThat(result.isSuccess()).isTrue();
+        assertThat(result.data()).containsEntry("trial_run", true);
+        assertThat(result.data()).containsEntry("command", 
+            "python script.py --dangerous");
         
-        String json = toJson(msg);
-        
-        JsonAssert.assertThat(json)
-            .node("executionId").isPresent()
-            .node("taskName").isEqualTo("test-task")
-            .node("status").isEqualTo("COMPLETED")
-            .node("workerId").isEqualTo("worker-1")
-            .node("sequenceNumber").isEqualTo(1);
+        // Verify nothing was actually executed (check logs)
     }
 }
 ```
 
-## Implementation Phases
+### End-to-End Tests
 
-### Phase 1: Core Infrastructure (Sprint 1-2)
-
-**Goals**: Basic orchestration working end-to-end in local dev.
-
-**Stories**:
-
-1. **Setup Project Structure**
-   - Create Maven/Gradle multi-module project
-   - Configure Quarkus dependencies
-   - Setup H2 and Hazelcast for dev profile
-   - Create Docker Compose for local dev
-   - **Acceptance**: `mvn clean install` succeeds
-
-2. **Database Schema & Migrations**
-   - Implement Flyway migrations
-   - Create all tables from data model
-   - Add indexes
-   - **Acceptance**: Migrations run successfully on H2 and Postgres
-
-3. **Repository Pattern Implementation**
-   - Define repository interfaces
-   - Implement Postgres repositories
-   - Implement H2 repositories (where different)
-   - Add profile-based selection
-   - **Acceptance**: All repository tests pass
-
-4. **Queue Abstraction**
-   - Define QueueService interface
-   - Implement HazelcastQueueService
-   - Implement PubSubQueueService (stub for now)
-   - **Acceptance**: Can publish and consume messages in dev
-
-5. **YAML Configuration Loading**
-   - Implement GraphLoader
-   - Add YAML parsing with SnakeYAML
-   - Implement GraphValidator
-   - Add cycle detection with JGraphT
-   - **Acceptance**: Sample graphs load successfully on startup
-
-6. **Vert.x Event Bus Setup**
-   - Configure event bus
-   - Define all event types (sealed interfaces/records)
-   - Create ExternalEventConsumer bridge
-   - **Acceptance**: Events flow from external queue to internal bus
-
-### Phase 2: Core Orchestration (Sprint 3-4)
-
-**Goals**: Graph evaluation and task scheduling working.
-
-**Stories**:
-
-1. **JGraphT Service**
-   - Implement DAG building
-   - Implement cycle detection
-   - Implement ready task detection
-   - Implement topological sorting
-   - **Acceptance**: All JGraphT service tests pass
-
-2. **Graph Evaluator**
-   - Implement graph evaluation logic
-   - Handle task completion events
-   - Handle task failure events
-   - Implement global task coordination
-   - **Acceptance**: Simple graph executes successfully
-
-3. **Task Queue Publisher**
-   - Implement work message publishing
-   - Add retry logic for publish failures
-   - Update task status to QUEUED
-   - **Acceptance**: Tasks appear in queue after evaluation
-
-4. **Worker Main Loop**
-   - Implement worker registration
-   - Implement heartbeat mechanism
-   - Implement work consumption
-   - Implement task result publishing
-   - **Acceptance**: Worker picks up work and publishes results
-
-5. **Stubbed Task Handlers**
-   - Implement stub for DbtHandler
-   - Implement stub for BqExtractHandler
-   - Implement stub for DataplexHandler
-   - Implement stub for DataflowHandler
-   - **Acceptance**: All task types can be stubbed in dev
-
-6. **End-to-End Integration Test**
-   - Create simple test graph (3 tasks, linear)
-   - Test full execution flow
-   - Verify all tasks complete
-   - **Acceptance**: Integration test passes reliably
-
-### Phase 3: Resilience & Monitoring (Sprint 5-6)
-
-**Goals**: Worker failure recovery, observability, resource limits.
-
-**Stories**:
-
-1. **Worker Monitor**
-   - Implement heartbeat checking
-   - Implement dead worker detection
-   - Publish worker.died events
-   - **Acceptance**: Dead workers detected within 60s
-
-2. **Work Recovery Service**
-   - Implement orphaned task detection
-   - Implement retry logic
-   - Implement max retry handling
-   - **Acceptance**: Tasks recover after worker death
-
-3. **Race Condition Prevention**
-   - Add optimistic locking with version columns
-   - Add global task execution lock (unique index)
-   - Add event sequence numbers
-   - **Acceptance**: Concurrent evaluations don't create duplicates
-
-4. **Metrics Implementation**
-   - Add Micrometer metrics
-   - Implement MetricsService
-   - Add Prometheus endpoint
-   - Create Grafana dashboard
-   - **Acceptance**: Metrics visible in Prometheus
-
-5. **Structured Logging**
-   - Add execution IDs to all log statements
-   - Implement structured logging format
-   - Add log sanitization for secrets
-   - **Acceptance**: Logs parseable in Cloud Logging
-
-6. **OpenTelemetry Tracing**
-   - Add tracing instrumentation
-   - Implement TracingService
-   - Propagate trace context through events
-   - **Acceptance**: End-to-end traces visible
-
-7. **Resource Limits**
-   - Implement GraphValidator with limits
-   - Implement ExecutionThrottler
-   - Implement TaskCircuitBreaker
-   - **Acceptance**: Limits enforced, violations logged
-
-8. **Data Retention**
-   - Implement RetentionService
-   - Add cleanup scheduled job
-   - Add archive to BigQuery (optional)
-   - **Acceptance**: Old executions cleaned up daily
-
-### Phase 4: UI & API (Sprint 7-8)
-
-**Goals**: Web UI for visualization and management.
-
-**Stories**:
-
-1. **Graph List Page**
-   - Create GraphController
-   - Create graphs-list.html template
-   - Integrate Tabulator.js
-   - Add execute button
-   - **Acceptance**: Can view all graphs and trigger executions
-
-2. **Graph Detail Page**
-   - Create graph-detail.html template
-   - Implement DAG visualization with SVG
-   - Add auto-refresh for running executions
-   - Show task table
-   - **Acceptance**: Can view real-time execution status
-
-3. **Graph History Page**
-   - Create graph-history.html template
-   - Add date range filters
-   - Integrate Tabulator.js for history table
-   - **Acceptance**: Can view past executions with filtering
-
-4. **Gantt View**
-   - Create gantt-view.html template
-   - Integrate vis-timeline.js
-   - Show task execution timeline
-   - **Acceptance**: Can view execution timeline
-
-5. **REST API**
-   - Create GraphApiController
-   - Implement trigger endpoint
-   - Implement pause/resume endpoints
-   - Implement status query endpoint
-   - **Acceptance**: API contract tests pass
-
-6. **CSS Styling**
-   - Create app.css
-   - Style status badges
-   - Style DAG visualization
-   - Make responsive
-   - **Acceptance**: UI looks professional
-
-7. **OAuth Integration**
-   - Implement SecurityService
-   - Add JWT token validation
-   - Add role-based permissions
-   - Protect all endpoints
-   - **Acceptance**: Unauthorized requests rejected
-
-8. **Cloud Logging Links**
-   - Generate Cloud Logging URLs
-   - Add log links to task table
-   - Include execution ID in log queries
-   - **Acceptance**: Log links work correctly
-
-### Phase 5: Production Deployment (Sprint 9-10)
-
-**Goals**: Deploy to GKE, implement real task handlers.
-
-**Stories**:
-
-1. **Real Task Handlers**
-   - Implement production DbtHandler
-   - Implement production BqExtractHandler
-   - Implement production DataplexHandler
-   - Implement production DataflowHandler
-   - **Acceptance**: All handlers work in prod profile
-
-2. **Pub/Sub Integration**
-   - Finish PubSubQueueService implementation
-   - Create topics and subscriptions
-   - Test message flow
-   - **Acceptance**: Messages flow through Pub/Sub
-
-3. **GCP IAM Setup**
-   - Create service accounts
-   - Assign IAM roles
-   - Configure Workload Identity
-   - **Acceptance**: Pods can authenticate to GCP services
-
-4. **Kubernetes Manifests**
-   - Create all K8s YAML files
-   - Configure Cloud SQL proxy
-   - Configure HPA
-   - Configure Ingress
-   - **Acceptance**: All manifests apply successfully
-
-5. **CI/CD Pipeline**
-   - Setup Cloud Build
-   - Create build triggers
-   - Implement automated testing
-   - Implement automated deployment
-   - **Acceptance**: Commits trigger builds and deployments
-
-6. **Monitoring & Alerting**
-   - Setup Prometheus scraping
-   - Create Grafana dashboards
-   - Configure alerting rules
-   - Integrate with Dynatrace
-   - **Acceptance**: Alerts fire for errors
-
-7. **Documentation**
-   - Write deployment runbook
-   - Document configuration options
-   - Create troubleshooting guide
-   - Document API endpoints
-   - **Acceptance**: Team can deploy and operate
-
-8. **Load Testing**
-   - Create JMeter test plans
-   - Run load tests
-   - Tune performance
-   - Verify HPA behavior
-   - **Acceptance**: Meets performance targets
-
-9. **Production Readiness Review**
-   - Security audit
-   - Performance review
-   - Disaster recovery plan
-   - Incident response procedures
-   - **Acceptance**: Sign-off from stakeholders
-
-10. **Go-Live**
-   - Deploy to production
-   - Migrate first workflow
-   - Monitor closely
-   - **Acceptance**: First production workflow executes successfully
-
-### Phase 6: Iteration & Enhancement (Ongoing)
-
-**Future Enhancements** (not in initial scope):
-
-1. **Configuration Hot Reload**
-   - Watch ConfigMap for changes
-   - Reload without restart
-   - Version graph definitions
-
-2. **High Availability**
-   - Multiple orchestrator instances
-   - Leader election
-   - Distributed coordination
-
-3. **Conditional Execution**
-   - Task predicates
-   - Branch tasks
-   - Dynamic task generation
-
-4. **Cross-Graph Dependencies**
-   - Graph-level dependencies
-   - Complex trigger rules
-
-5. **Advanced Scheduling**
-   - Cron-based triggers
-   - Event-based triggers (beyond Pub/Sub)
-   - Backfill capabilities
-
-6. **Cost Tracking**
-   - Parse task results for billing info
-   - Aggregate costs per graph
-   - Cost alerts
-
-7. **Audit & Compliance**
-   - Detailed audit logs
-   - Compliance reporting
-   - Data lineage tracking
-
-8. **Enhanced UI**
-   - Graph editor (visual DAG builder)
-   - Execution comparison
-   - Advanced filtering and search
-   - Email/Slack notifications
-
-## Operational Considerations
-
-### Failure Scenarios & Recovery
-
-**Cloud SQL Unavailable**:
-- **Impact**: Orchestrator cannot read/write state
-- **Detection**: Health check fails, database connection errors
-- **Recovery**:
-   - GKE restarts orchestrator pod
-   - Pod waits for Cloud SQL to become available
-   - No data loss (Postgres handles failures)
-- **Mitigation**: Cloud SQL HA configuration
-
-**Pub/Sub Unavailable**:
-- **Impact**: Tasks cannot be queued, events cannot be published
-- **Detection**: Publish operations fail
-- **Recovery**:
-   - Orchestrator retries with exponential backoff
-   - Messages are not lost (stored in DB state)
-   - When Pub/Sub recovers, pending tasks are re-queued
-- **Mitigation**: Pub/Sub is highly available, regional outages rare
-
-**Orchestrator Pod Dies**:
-- **Impact**: In-progress evaluations lost (but not graph state)
-- **Detection**: Kubernetes liveness probe fails
-- **Recovery**:
-   - GKE immediately starts new pod
-   - New pod loads graph definitions
-   - Running executions continue from DB state
-   - Tasks in queue continue to be processed by workers
-- **Mitigation**: Keep orchestrator stateless, rely on DB for state
-
-**Worker Pod Dies**:
-- **Impact**: Task execution interrupted
-- **Detection**: No heartbeat for 60s
-- **Recovery**:
-   - WorkerMonitor marks worker dead
-   - WorkRecoveryService re-queues task
-   - Task retries up to max_retries
-- **Mitigation**: Set appropriate retry policies per task
-
-**Database Corruption**:
-- **Impact**: Potential data loss
-- **Detection**: Query errors, constraint violations
-- **Recovery**:
-   - Restore from Cloud SQL automated backup
-   - Replay recent events if available
-- **Mitigation**:
-   - Cloud SQL automated backups (daily + point-in-time)
-   - Regular backup testing
-
-**Full Cluster Outage**:
-- **Impact**: All orchestration stops
-- **Detection**: All pods unreachable
-- **Recovery**:
-   - Failover to backup GKE cluster (manual)
-   - Restore database from backup
-   - Redeploy all components
-- **Mitigation**: Multi-region setup (future enhancement)
-
-### Monitoring & Alerting
-
-**Critical Alerts**:
-1. **Orchestrator Pod Down**
-   - Trigger: No healthy pods for 2 minutes
-   - Action: Page on-call engineer
-
-2. **Database Connection Failed**
-   - Trigger: Connection errors > 10/minute
-   - Action: Page on-call engineer
-
-3. **Worker Pods Scaling Issues**
-   - Trigger: Queue depth > 1000 but workers not scaling
-   - Action: Alert team, check HPA
-
-4. **Task Failure Rate High**
-   - Trigger: Task failure rate > 20% over 10 minutes
-   - Action: Alert team, investigate tasks
-
-5. **Stalled Graph Executions**
-   - Trigger: Graph in STALLED status for > 30 minutes
-   - Action: Alert team, review dependencies
-
-**Warning Alerts**:
-1. **Queue Depth Growing**
-   - Trigger: Queue depth > 500
-   - Action: Monitor, may need more workers
-
-2. **Slow Task Execution**
-   - Trigger: p99 task duration > 2x normal
-   - Action: Investigate specific tasks
-
-3. **Circuit Breaker Open**
-   - Trigger: Circuit breaker open for any task
-   - Action: Investigate failing task
-
-**Dashboards**:
-1. **Overview Dashboard**
-   - Active graph executions
-   - Task completion rate
-   - Worker count
-   - Queue depth
-
-2. **Performance Dashboard**
-   - Task duration histograms by type
-   - Graph evaluation latency
-   - Database query performance
-   - Queue publish/consume rates
-
-3. **Reliability Dashboard**
-   - Error rates by component
-   - Worker death rate
-   - Task retry rate
-   - Circuit breaker status
-
-### Troubleshooting Guide
-
-**Problem: Graph execution stuck in RUNNING**
-```
-1. Check graph detail page - which tasks are pending?
-2. Look at task dependencies - are upstream tasks completed?
-3. Check task_executions table:
-   SELECT * FROM task_executions WHERE graph_execution_id = '<id>';
-4. If tasks are QUEUED but not RUNNING:
-   - Check worker count: kubectl get pods -n orchestrator
-   - Check queue depth in Pub/Sub console
-   - Check worker logs for errors
-5. If tasks are PENDING but should be QUEUED:
-   - Check orchestrator logs for evaluation errors
-   - Manually trigger evaluation via API
-```
-
-**Problem: Tasks failing repeatedly**
-```
-1. Check task logs via Cloud Logging link
-2. Look at error message in task_executions table
-3. Common issues:
-   - Invalid config (typo in YAML)
-   - Missing GCP permissions
-   - Resource not found (table, bucket, etc.)
-   - Timeout too short
-4. Fix and retry:
-   - Update ConfigMap
-   - Restart pods to reload config
-   - Trigger new execution
-```
-
-**Problem: Workers not scaling**
-```
-1. Check HPA status:
-   kubectl get hpa -n orchestrator
-2. Check metric server:
-   kubectl top pods -n orchestrator
-3. Check Pub/Sub metric:
-   gcloud pubsub subscriptions describe orchestrator-work-sub
-4. If metric not available:
-   - Check Workload Identity binding
-   - Check IAM permissions
-5. Manual scale if needed:
-   kubectl scale deployment/workers -n orchestrator --replicas=10
-```
-
-**Problem: High database CPU**
-```
-1. Check slow query log in Cloud SQL
-2. Look for missing indexes
-3. Check for lock contention
-4. Consider:
-   - Adding indexes
-   - Optimizing queries
-   - Scaling up Cloud SQL instance
-```
-
-### Backup & Restore
-
-**Backup Strategy**:
-- Cloud SQL automated backups: Daily at 2 AM UTC
-- Point-in-time recovery: Enabled (7 days)
-- ConfigMap backups: Stored in Git
-- Docker images: Tagged and stored in GCR
-
-**Restore Procedure**:
-```bash
-# 1. Restore database from backup
-gcloud sql backups restore <BACKUP_ID> \
-    --backup-instance=<INSTANCE> \
-    --backup-project=<PROJECT>
-
-# 2. Verify data
-kubectl exec -it deployment/orchestrator -n orchestrator -- \
-    psql -h cloudsql-proxy -U orchestrator -d orchestrator \
-    -c "SELECT COUNT(*) FROM graphs;"
-
-# 3. Restart pods to reconnect
-kubectl rollout restart deployment/orchestrator -n orchestrator
-kubectl rollout restart deployment/workers -n orchestrator
-
-# 4. Verify system health
-kubectl get pods -n orchestrator
-curl https://orchestrator.example.com/q/health
-```
-
-**Disaster Recovery RTO/RPO**:
-- **RTO** (Recovery Time Objective): 1 hour
-- **RPO** (Recovery Point Objective): 5 minutes (point-in-time recovery)
-
-### Security Considerations
-
-**Secrets Management**:
-- Database passwords: Kubernetes Secrets
-- OAuth client secrets: Kubernetes Secrets
-- GCP service account keys: Workload Identity (no keys stored)
-
-**Network Security**:
-- Ingress: TLS termination with cert-manager
-- Internal communication: Within VPC, no public endpoints
-- Cloud SQL: Private IP only
-
-**Access Control**:
-- API: OAuth token required
-- UI: OAuth login required
-- Kubernetes: RBAC configured
-
-**Audit Logging**:
-- All API calls logged with user identity
-- All graph executions logged with trigger source
-- All configuration changes logged
-
-**Compliance**:
-- Data residency: Configurable by region
-- Data retention: Configurable, default 90 days
-- PII handling: No PII stored in system
-
-## Conclusion
-
-This design provides a complete, production-ready event-driven orchestrator for GKE with the following key characteristics:
-
-**Strengths**:
-- Simple, understandable architecture
-- Event-driven for loose coupling
-- Resilient to worker and orchestrator failures
-- Scalable via HPA
-- Observable via metrics, logs, and traces
-- Easy local development with H2 and Hazelcast
-- Clean separation of concerns via repository pattern and queue abstraction
-
-**Limitations** (acceptable for v1):
-- Single orchestrator instance (no HA)
-- No configuration hot reload
-- No conditional task execution
-- No cross-graph dependencies
-- Tasks must be idempotent (system doesn't enforce)
-
-**Future Enhancements**:
-- High availability orchestrator with leader election
-- Configuration hot reload
-- Advanced scheduling (cron, complex triggers)
-- Cost tracking and budget alerts
-- Visual graph editor
-- Enhanced monitoring and alerting
-
-The phased implementation approach ensures early value delivery while building toward a robust, production-grade system.# GKE Event-Driven Orchestrator Design Document
-
-## Table of Contents
-1. [Overview](#overview)
-2. [Architecture](#architecture)
-3. [Data Model](#data-model)
-4. [Configuration Schema](#configuration-schema)
-5. [Core Components](#core-components)
-6. [Interfaces and Abstractions](#interfaces-and-abstractions)
-7. [Environment Profiles](#environment-profiles)
-8. [Deployment](#deployment)
-9. [Development Workflow](#development-workflow)
-10. [Testing Strategy](#testing-strategy)
-11. [Implementation Phases](#implementation-phases)
-
-## Overview
-
-### Purpose
-Build a Quarkus-based workflow orchestrator running on Google Kubernetes Engine (GKE) that enables event-driven execution of data pipeline tasks. The system provides visualization of workflow state similar to Apache Airflow, with a focus on simplicity and developer experience.
-
-### Key Requirements
-- Event-driven architecture using Pub/Sub for task coordination
-- SSR-based UI for workflow visualization (no React)
-- Worker pods that pull tasks from queues
-- Support for DBT, BigQuery Extract, Dataplex, and Dataflow tasks
-- Management topic for worker lifecycle commands
-- Worker heartbeat mechanism with automatic work recovery
-- State persistence in Cloud SQL (Postgres)
-- Graph evaluation only on event arrival (not polling)
-- JGraphT for DAG management
-- Support for global tasks (shared across multiple graphs)
-- Repository pattern for database abstraction
-- Queue abstraction for local development
-
-### Technology Stack
-- **Framework**: Quarkus with Vert.x event bus
-- **Graph Library**: JGraphT
-- **Database**: Cloud SQL Postgres (production), H2 (local dev)
-- **Messaging**: Google Cloud Pub/Sub (production), Hazelcast (local dev)
-- **Container Orchestration**: GKE with HPA
-- **UI**: Qute templates (SSR)
-- **Language**: Java 21+
-
-## Architecture
-
-### System Context Diagram
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         GKE Cluster                              │
-│                                                                  │
-│  ┌────────────────────┐           ┌─────────────────────────┐  │
-│  │   Orchestrator     │           │   Worker Pods (HPA)     │  │
-│  │    (Quarkus)       │           │                         │  │
-│  │                    │           │  ┌────────┐ ┌────────┐  │  │
-│  │  - Graph Loader    │           │  │Worker 1│ │Worker 2│  │  │
-│  │  - Event Consumer  │           │  │        │ │        │  │  │
-│  │  - Graph Evaluator │           │  └────────┘ └────────┘  │  │
-│  │  - Worker Monitor  │           │         ...              │  │
-│  │  - UI (SSR)        │           │                         │  │
-│  │  - REST API        │           │  Each worker:           │  │
-│  │                    │           │  - Pulls from queue     │  │
-│  └────────────────────┘           │  - Executes tasks       │  │
-│           │                       │  - Sends heartbeats     │  │
-│           │                       │  - Publishes results    │  │
-│           │                       └─────────────────────────┘  │
-└───────────┼──────────────────────────────────────────────────────┘
-            │
-    ┌───────┴────────┐
-    ▼                ▼
-┌─────────┐    ┌──────────────┐      ┌──────────────────┐
-│Cloud SQL│    │  Pub/Sub     │      │  Config Files    │
-│Postgres │    │              │      │  (ConfigMap)     │
-│         │    │ ┌──────────┐ │      │                  │
-│State &  │    │ │Task Queue│ │      │  graphs/*.yaml   │
-│Metadata │    │ └──────────┘ │      │  tasks/*.yaml    │
-└─────────┘    │ ┌──────────┐ │      └──────────────────┘
-               │ │Management│ │
-               │ │  Topic   │ │
-               │ └──────────┘ │
-               │ ┌──────────┐ │
-               │ │  Events  │ │
-               │ │  Topic   │ │
-               │ └──────────┘ │
-               └──────────────┘
-```
-
-### Component Interaction Flow
-
-#### Graph Evaluation Flow
-```
-1. External Event arrives (task completed/failed)
-   ↓
-2. ExternalEventConsumer bridges to internal event bus
-   ↓
-3. GraphEvaluator receives internal event
-   ↓
-4. Update task status in repository
-   ↓
-5. If global task → find all affected graphs
-   ↓
-6. Build DAG using JGraphT
-   ↓
-7. Determine ready tasks (all dependencies met)
-   ↓
-8. For each ready task:
-   - Create TaskExecution record
-   - Publish "task.ready" event
-   ↓
-9. TaskQueuePublisher receives "task.ready"
-   ↓
-10. Publish WorkMessage to queue (Pub/Sub or Hazelcast)
-    ↓
-11. Worker pulls message
-    ↓
-12. Worker executes task
-    ↓
-13. Worker publishes result to events topic
-    ↓
-14. Loop back to step 1
-```
-
-#### Worker Lifecycle Flow
-```
-1. Worker pod starts
-   ↓
-2. Worker sends registration message to management topic
-   ↓
-3. WorkerMonitor creates worker record
-   ↓
-4. Worker starts heartbeat timer (every 10s)
-   ↓
-5. WorkerMonitor checks heartbeats (every 30s)
-   ↓
-6. If no heartbeat for 60s:
-   - Mark worker as dead
-   - Publish "worker.died" event
-   ↓
-7. WorkRecoveryService receives "worker.died"
-   ↓
-8. Find all assigned work for dead worker
-   ↓
-9. For each orphaned task:
-   - If retries remaining → publish "task.retry"
-   - Else → mark as failed
-   ↓
-10. GraphEvaluator re-evaluates affected graphs
-```
-
-## Data Model
-
-### Database Schema
-
-All timestamps are stored in UTC. The schema uses UUID for primary keys to avoid conflicts in distributed systems.
-
-#### Tables
-
-##### `graphs`
-Stores graph definitions loaded from YAML configuration files.
-
-```sql
-CREATE TABLE graphs (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name VARCHAR(255) UNIQUE NOT NULL,
-    description TEXT,
-    yaml_content TEXT NOT NULL,  -- Original YAML for reference/debugging
-    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    CONSTRAINT graphs_name_format CHECK (name ~ '^[a-z0-9-]+$')
-);
-
-CREATE INDEX idx_graphs_name ON graphs(name);
-```
-
-##### `tasks`
-Task definitions, both global (shared across graphs) and graph-specific.
-
-```sql
-CREATE TABLE tasks (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name VARCHAR(255) UNIQUE NOT NULL,
-    type VARCHAR(50) NOT NULL,  -- 'dbt', 'bq_extract', 'dataplex', 'dataflow'
-    config JSONB NOT NULL,
-    retry_policy JSONB NOT NULL DEFAULT '{"max_retries": 3, "backoff": "exponential", "initial_delay_seconds": 30}'::jsonb,
-    timeout_seconds INT NOT NULL DEFAULT 3600,
-    is_global BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    CONSTRAINT tasks_name_format CHECK (name ~ '^[a-z0-9-]+$'),
-    CONSTRAINT tasks_type_valid CHECK (type IN ('dbt', 'bq_extract', 'dataplex', 'dataflow')),
-    CONSTRAINT tasks_timeout_positive CHECK (timeout_seconds > 0)
-);
-
-CREATE INDEX idx_tasks_name ON tasks(name);
-CREATE INDEX idx_tasks_global ON tasks(name) WHERE is_global = TRUE;
-CREATE INDEX idx_tasks_type ON tasks(type);
-```
-
-##### `graph_edges`
-Defines the DAG structure within each graph (task dependencies).
-
-```sql
-CREATE TABLE graph_edges (
-    graph_id UUID NOT NULL REFERENCES graphs(id) ON DELETE CASCADE,
-    from_task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    to_task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (graph_id, from_task_id, to_task_id),
-    CONSTRAINT graph_edges_no_self_reference CHECK (from_task_id != to_task_id)
-);
-
-CREATE INDEX idx_graph_edges_graph ON graph_edges(graph_id);
-CREATE INDEX idx_graph_edges_from ON graph_edges(from_task_id);
-CREATE INDEX idx_graph_edges_to ON graph_edges(to_task_id);
-```
-
-##### `graph_executions`
-Tracks execution instances of graphs.
-
-```sql
-CREATE TABLE graph_executions (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    graph_id UUID NOT NULL REFERENCES graphs(id) ON DELETE CASCADE,
-    status VARCHAR(20) NOT NULL DEFAULT 'running',
-    started_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    completed_at TIMESTAMP,
-    triggered_by VARCHAR(255) NOT NULL,  -- Event ID or system trigger
-    error_message TEXT,
-    CONSTRAINT graph_executions_status_valid CHECK (
-        status IN ('running', 'completed', 'failed', 'stalled')
-    ),
-    CONSTRAINT graph_executions_completed_when_done CHECK (
-        (status IN ('completed', 'failed') AND completed_at IS NOT NULL) OR
-        (status IN ('running', 'stalled') AND completed_at IS NULL)
-    )
-);
-
-CREATE INDEX idx_graph_executions_graph ON graph_executions(graph_id);
-CREATE INDEX idx_graph_executions_status ON graph_executions(status);
-CREATE INDEX idx_graph_executions_started ON graph_executions(started_at DESC);
-```
-
-##### `task_executions`
-Tracks individual task executions within graph executions.
-
-```sql
-CREATE TABLE task_executions (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    graph_execution_id UUID NOT NULL REFERENCES graph_executions(id) ON DELETE CASCADE,
-    task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    status VARCHAR(20) NOT NULL DEFAULT 'pending',
-    attempt INT NOT NULL DEFAULT 0,
-    assigned_worker_id VARCHAR(255),
-    queued_at TIMESTAMP,
-    started_at TIMESTAMP,
-    completed_at TIMESTAMP,
-    error_message TEXT,
-    result JSONB,
-    -- For global tasks: link to the canonical execution
-    global_execution_id UUID REFERENCES task_executions(id),
-    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    CONSTRAINT task_executions_unique_per_graph UNIQUE(graph_execution_id, task_id),
-    CONSTRAINT task_executions_status_valid CHECK (
-        status IN ('pending', 'queued', 'running', 'completed', 'failed', 'skipped')
-    ),
-    CONSTRAINT task_executions_attempt_positive CHECK (attempt >= 0),
-    CONSTRAINT task_executions_timestamps_ordered CHECK (
-        (queued_at IS NULL OR started_at IS NULL OR queued_at <= started_at) AND
-        (started_at IS NULL OR completed_at IS NULL OR started_at <= completed_at)
-    )
-);
-
-CREATE INDEX idx_task_executions_graph ON task_executions(graph_execution_id);
-CREATE INDEX idx_task_executions_task ON task_executions(task_id);
-CREATE INDEX idx_task_executions_status ON task_executions(status);
-CREATE INDEX idx_task_executions_worker ON task_executions(assigned_worker_id) 
-    WHERE assigned_worker_id IS NOT NULL;
-CREATE INDEX idx_task_executions_global ON task_executions(global_execution_id) 
-    WHERE global_execution_id IS NOT NULL;
-CREATE INDEX idx_task_executions_running_global ON task_executions(task_id) 
-    WHERE status = 'running' AND global_execution_id IS NULL;
-```
-
-##### `workers`
-Registry of active and dead workers.
-
-```sql
-CREATE TABLE workers (
-    id VARCHAR(255) PRIMARY KEY,  -- Kubernetes pod name
-    status VARCHAR(20) NOT NULL DEFAULT 'active',
-    last_heartbeat TIMESTAMP NOT NULL DEFAULT NOW(),
-    registered_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    capabilities JSONB NOT NULL DEFAULT '{}'::jsonb,  -- For future heterogeneous workers
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,  -- Pod IP, node name, etc.
-    CONSTRAINT workers_status_valid CHECK (status IN ('active', 'dead'))
-);
-
-CREATE INDEX idx_workers_status ON workers(status);
-CREATE INDEX idx_workers_heartbeat ON workers(last_heartbeat) WHERE status = 'active';
-```
-
-##### `work_assignments`
-Tracks which worker is assigned to which task (for failure recovery).
-
-```sql
-CREATE TABLE work_assignments (
-    task_execution_id UUID PRIMARY KEY REFERENCES task_executions(id) ON DELETE CASCADE,
-    worker_id VARCHAR(255) NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
-    assigned_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    heartbeat_deadline TIMESTAMP NOT NULL,
-    CONSTRAINT work_assignments_deadline_future CHECK (heartbeat_deadline > assigned_at)
-);
-
-CREATE INDEX idx_work_assignments_worker ON work_assignments(worker_id);
-CREATE INDEX idx_work_assignments_deadline ON work_assignments(heartbeat_deadline);
-```
-
-### Entity Relationships
-
-```
-graphs 1──────* graph_edges *──────1 tasks
-  │                                    │
-  │                                    │
-  │ 1                                  │ 1
-  │                                    │
-  * graph_executions                   * task_executions
-        │                                    │
-        │ 1                                  │ *
-        │                                    │
-        *────────────────────────────────────*
-                                             │
-                                             │ 1
-                                             │
-                                             * work_assignments * ────1 workers
-```
-
-### Enums and Constants
+Use Testcontainers for full stack:
 
 ```java
-public enum TaskType {
-    DBT("dbt"),
-    BQ_EXTRACT("bq_extract"),
-    DATAPLEX("dataplex"),
-    DATAFLOW("dataflow");
+@QuarkusTest
+@TestProfile(E2ETestProfile.class)
+class EndToEndTest {
+    @Container
+    static HazelcastContainer hazelcast = 
+        new HazelcastContainer("hazelcast/hazelcast:5.3");
     
-    private final String value;
-}
-
-public enum TaskStatus {
-    PENDING,    // Created but not yet queued
-    QUEUED,     // Published to queue
-    RUNNING,    // Worker is executing
-    COMPLETED,  // Successfully finished
-    FAILED,     // Failed (may retry)
-    SKIPPED     // Skipped due to upstream failure
-}
-
-public enum GraphStatus {
-    RUNNING,    // In progress
-    COMPLETED,  // All tasks completed
-    FAILED,     // One or more tasks failed permanently
-    STALLED     // No tasks can make progress
-}
-
-public enum WorkerStatus {
-    ACTIVE,     // Receiving heartbeats
-    DEAD        // No heartbeat for >60s
-}
-
-public class Constants {
-    public static final int WORKER_HEARTBEAT_INTERVAL_SECONDS = 10;
-    public static final int WORKER_DEAD_THRESHOLD_SECONDS = 60;
-    public static final int WORKER_MONITOR_CHECK_INTERVAL_SECONDS = 30;
-    public static final String CONFIG_PATH = "/config";
-    public static final String GRAPHS_PATTERN = "graphs/*.yaml";
-    public static final String TASKS_PATTERN = "tasks/*.yaml";
+    @Test
+    void shouldExecuteGraphEndToEnd() {
+        // Deploy graph via API
+        given()
+            .contentType("application/yaml")
+            .body(loadTestGraph())
+        .when()
+            .post("/api/graphs")
+        .then()
+            .statusCode(201);
+        
+        // Trigger execution
+        String executionId = given()
+            .contentType("application/json")
+            .body(Map.of("params", Map.of("date", "2025-10-17")))
+        .when()
+            .post("/api/graphs/test-graph/execute")
+        .then()
+            .statusCode(200)
+            .extract()
+            .path("executionId");
+        
+        // Poll for completion
+        await().atMost(60, SECONDS).until(() -> {
+            String status = given()
+                .when()
+                    .get("/api/graphs/executions/" + executionId)
+                .then()
+                    .statusCode(200)
+                    .extract()
+                    .path("status");
+            
+            return "COMPLETED".equals(status);
+        });
+        
+        // Verify events logged
+        String events = given()
+            .when()
+                .get("/api/events?execution=" + executionId)
+            .then()
+                .statusCode(200)
+                .extract()
+                .asString();
+        
+        assertThat(events).contains("GRAPH_STARTED");
+        assertThat(events).contains("TASK_COMPLETED");
+        assertThat(events).contains("GRAPH_COMPLETED");
+    }
 }
 ```
 
-## Configuration Schema
+---
 
-### Task Definition YAML
+## Deployment Guide
 
-Task definitions are reusable components that can be referenced by multiple graphs.
+### Local Development
 
-**Location**: `tasks/{task-name}.yaml`
+**Prerequisites**:
+- Java 21+
+- Maven or Gradle
 
-**Schema**:
+**Steps**:
+
+1. Clone repository
+```bash
+git clone https://github.com/yourorg/orchestrator.git
+cd orchestrator
+```
+
+2. Build
+```bash
+./mvnw clean package
+```
+
+3. Create config directories
+```bash
+mkdir -p graphs tasks data/events
+```
+
+4. Create sample graph
+```bash
+cat > graphs/hello-world.yaml <<EOF
+name: hello-world
+tasks:
+  - name: say-hello
+    command: echo
+    args:
+      - "Hello, World!"
+EOF
+```
+
+5. Run
+```bash
+java -jar target/quarkus-app/quarkus-run.jar
+```
+
+6. Open browser
+```bash
+open http://localhost:8080
+```
+
+### Docker
+
+**Build**:
+```bash
+docker build -t orchestrator:latest .
+```
+
+**Run**:
+```bash
+docker run -p 8080:8080 \
+  -v $(pwd)/graphs:/config/graphs \
+  -v $(pwd)/tasks:/config/tasks \
+  -v $(pwd)/data:/data \
+  orchestrator:latest
+```
+
+### Docker Compose (Full Stack)
+
 ```yaml
-# Unique task name (must match filename without .yaml extension)
-name: string                # Required. Pattern: ^[a-z0-9-]+$
+# docker-compose.yml
+version: '3.8'
 
-# Task type determines which handler executes it
-type: enum                  # Required. One of: dbt, bq_extract, dataplex, dataflow
-
-# Is this task shared across multiple graphs?
-global: boolean             # Optional. Default: false
-
-# Retry configuration
-retry_policy:               # Optional
-  max_retries: integer      # Default: 3
-  backoff: enum             # Default: exponential. One of: exponential, linear, constant
-  initial_delay_seconds: integer  # Default: 30
-  max_delay_seconds: integer      # Optional. Default: 3600
-
-# Maximum execution time
-timeout_seconds: integer    # Optional. Default: 3600
-
-# Task-specific configuration (passed to task handler)
-config: object              # Required. Structure depends on task type
+services:
+  hazelcast:
+    image: hazelcast/hazelcast:5.3
+    environment:
+      JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "5701:5701"
+  
+  orchestrator:
+    build: .
+    environment:
+      ORCHESTRATOR_MODE: prod
+      HAZELCAST_MEMBERS: hazelcast:5701
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./graphs:/config/graphs:ro
+      - ./tasks:/config/tasks:ro
+      - ./data:/data
+    depends_on:
+      - hazelcast
+  
+  worker:
+    build: .
+    command: ["worker"]
+    environment:
+      WORKER_THREADS: 8
+      HAZELCAST_MEMBERS: hazelcast:5701
+    volumes:
+      - ./graphs:/config/graphs:ro
+      - ./tasks:/config/tasks:ro
+    depends_on:
+      - hazelcast
+    deploy:
+      replicas: 2
 ```
 
-**Example - DBT Task**:
+### GKE Deployment
+
+**Prerequisites**:
+- GKE cluster
+- kubectl configured
+- Container images pushed to GCR
+
+**Deploy Hazelcast**:
+```bash
+kubectl apply -f k8s/hazelcast-statefulset.yaml
+```
+
+**Create ConfigMap**:
+```bash
+kubectl create configmap workflow-config \
+  --from-file=graphs/ \
+  --from-file=tasks/ \
+  -n orchestrator
+```
+
+**Deploy Orchestrator**:
+```bash
+kubectl apply -f k8s/orchestrator-deployment.yaml
+```
+
+**Deploy Workers**:
+```bash
+kubectl apply -f k8s/worker-deployment.yaml
+```
+
+**Verify**:
+```bash
+kubectl get pods -n orchestrator
+kubectl logs -n orchestrator deployment/orchestrator
+```
+
+**Access UI**:
+```bash
+kubectl port-forward -n orchestrator svc/orchestrator 8080:80
+open http://localhost:8080
+```
+
+---
+
+## Summary
+
+### What We're Building
+
+A **lightweight, portable, event-driven workflow orchestrator** that:
+
+1. **Runs anywhere** - Single binary, no dependencies
+2. **Uses simple YAML** - No Python code required
+3. **Deduplicates work** - Global tasks run once, notify many
+4. **Scales efficiently** - Multi-threaded workers for I/O workloads
+5. **Has great DX** - Dev mode, trial run, hot reload, web editor
+6. **Is observable** - Events in files, metrics, real-time UI
+7. **Gets out of your way** - Simple, fast, focused
+
+### Key Features
+
+✅ **Global Tasks** - Run once per parameter set, notify all graphs
+✅ **Parameter Scoping** - Clean override hierarchy
+✅ **JEXL Expressions** - Powerful, safe templating
+✅ **Single Process Dev Mode** - Everything in one process
+✅ **Trial Run** - Test without executing
+✅ **Web Editor** - Edit YAML in browser (dev only)
+✅ **File-Based Events** - JSONL files, not databases
+✅ **Multi-Threaded Workers** - Efficient for GCP workloads
+✅ **Tabler UI** - Professional, polished interface
+✅ **Hazelcast State** - Fast, distributed state management
+
+### Technology Stack
+
+- **Language**: Java 21
+- **Framework**: Quarkus
+- **State**: Hazelcast (embedded in dev, clustered in prod)
+- **Events**: JSONL files (local/GCS/S3)
+- **UI**: Qute + Tabler CSS + Monaco Editor
+- **Expressions**: Apache Commons JEXL
+- **DAG**: JGraphT
+- **Deployment**: Single binary or GKE
+
+### Next Steps
+
+1. **Create GitHub repository**
+2. **Generate feature issues** from this design
+3. **Setup CI/CD pipeline** (GitHub Actions)
+4. **Implement core features** in phases
+5. **Test extensively** (unit, integration, E2E)
+6. **Deploy to GKE**
+7. **Iterate based on feedback**
+
+---
+
+## Appendix: Example YAML Files
+
+### Example: Global Task
+
 ```yaml
 # tasks/load-market-data.yaml
 name: load-market-data
-type: dbt
 global: true
-retry_policy:
-  max_retries: 3
-  backoff: exponential
-  initial_delay_seconds: 30
-timeout_seconds: 600
-config:
-  project: analytics
-  models: +market_data
-  vars:
-    region: us
-    refresh_mode: full
-  target: prod
-```
+key: "load_market_${params.batch_date}_${params.region}"
 
-**Example - BigQuery Extract Task**:
-```yaml
-# tasks/extract-prices.yaml
-name: extract-prices
-type: bq_extract
-timeout_seconds: 300
-config:
-  project: my-project
-  dataset: raw_data
-  table: prices
-  destination: gs://my-bucket/prices/*.parquet
-  format: parquet
-  compression: snappy
-```
-
-**Example - Dataplex Task**:
-```yaml
-# tasks/run-quality-checks.yaml
-name: run-quality-checks
-type: dataplex
-timeout_seconds: 1800
-config:
-  project: my-project
-  location: us-central1
-  lake: analytics-lake
-  zone: raw-zone
-  scan: market-data-quality
-  wait_for_completion: true
-```
-
-**Example - Dataflow Task**:
-```yaml
-# tasks/aggregate-metrics.yaml
-name: aggregate-metrics
-type: dataflow
-timeout_seconds: 3600
-retry_policy:
-  max_retries: 2
-  backoff: exponential
-config:
-  project: my-project
-  region: us-central1
-  template: gs://my-bucket/templates/aggregate-market-metrics
-  temp_location: gs://my-bucket/temp
-  parameters:
-    input: gs://my-bucket/prices/*.parquet
-    output: my-project:analytics.market_metrics
-    window_size: 1h
-```
-
-### Graph Definition YAML
-
-Graphs define workflows as DAGs of tasks.
-
-**Location**: `graphs/{graph-name}.yaml`
-
-**Schema**:
-```yaml
-# Unique graph name (must match filename without .yaml extension)
-name: string                # Required. Pattern: ^[a-z0-9-]+$
-
-# Human-readable description (supports multi-line)
-description: string         # Optional
-
-# List of tasks in this graph
-tasks: array                # Required. At least one task
-  - # Option 1: Reference to existing task definition
-    task: string            # Task name from tasks/*.yaml
-    
-  - # Option 2: Inline task definition
-    name: string            # Required
-    type: enum              # Required
-    timeout_seconds: integer
-    retry_policy: object
-    config: object
-    depends_on: array       # Optional. List of task names this depends on
-      - string
-```
-
-**Example - Market Pipeline**:
-```yaml
-# graphs/market-pipeline.yaml
-name: market-pipeline
-description: |
-  Daily market data processing pipeline.
-  Runs after market close to process and aggregate trading data.
+params:
+  batch_date:
+    type: string
+    required: true
+    description: Business date to process (YYYY-MM-DD)
   
-  Steps:
-  1. Load raw market data (DBT)
-  2. Extract prices to GCS (BigQuery)
-  3. Run data quality checks (Dataplex)
-  4. Aggregate metrics (Dataflow)
+  region:
+    type: string
+    default: us
+    description: Market region (us, eu, asia)
+
+command: dbt
+args:
+  - run
+  - --models
+  - +market_data
+  - --vars
+  - "batch_date:${params.batch_date},region:${params.region}"
+  - --target
+  - prod
+
+env:
+  DBT_PROFILES_DIR: /dbt/profiles
+  DBT_TARGET: prod
+
+timeout: 600
+retry: 3
+```
+
+### Example: Graph with Multiple Tasks
+
+```yaml
+# graphs/daily-risk-calculation.yaml
+name: daily-risk-calculation
+description: |
+  Daily risk calculation pipeline.
+  Runs after market close to calculate VaR and stress scenarios.
+
+params:
+  batch_date:
+    type: string
+    default: "${date.today()}"
+    description: Processing date
+  
+  region:
+    type: string
+    default: us
+    description: Market region
+  
+  confidence_level:
+    type: number
+    default: 0.99
+    description: VaR confidence level
+
+env:
+  GCS_BUCKET: "gs://risk-data-${params.region}"
+  PROCESSING_DATE: "${params.batch_date}"
+
+schedule: "0 18 * * 1-5"  # 6 PM, weekdays only
 
 tasks:
-  # Reference to global task
+  # Global task - shared with other graphs
   - task: load-market-data
+    params:
+      batch_date: "${params.batch_date}"
+      region: "${params.region}"
   
-  # Inline task with dependencies
-  - name: extract-prices
-    type: bq_extract
-    timeout_seconds: 300
-    config:
-      project: my-project
-      dataset: raw_data
-      table: prices
-      destination: gs://my-bucket/prices/*.parquet
-      format: parquet
+  # Inline task - specific to this graph
+  - name: calculate-var
+    command: python
+    args:
+      - /opt/risk/var.py
+      - --date
+      - "${params.batch_date}"
+      - --region
+      - "${params.region}"
+      - --confidence
+      - "${params.confidence_level}"
+      - --output
+      - "${env.GCS_BUCKET}/var/${params.batch_date}.parquet"
+    env:
+      PYTHONUNBUFFERED: "1"
+    timeout: 1800
+    retry: 2
     depends_on:
       - load-market-data
   
-  - name: run-dataplex-quality
-    type: dataplex
-    timeout_seconds: 1800
-    config:
-      project: my-project
-      lake: analytics-lake
-      scan: market-data-quality
+  - name: stress-test
+    command: python
+    args:
+      - /opt/risk/stress.py
+      - --date
+      - "${params.batch_date}"
+      - --scenarios
+      - "recession,spike,crash"
+      - --input
+      - "${env.GCS_BUCKET}/var/${params.batch_date}.parquet"
+    timeout: 3600
     depends_on:
-      - extract-prices
-  
-  - name: aggregate-metrics
-    type: dataflow
-    timeout_seconds: 3600
-    config:
-      project: my-project
-      template: gs://my-bucket/templates/aggregate-market-metrics
-      parameters:
-        input: gs://my-bucket/prices/*.parquet
-        output: my-project:analytics.market_metrics
-    depends_on:
-      - run-dataplex-quality
-```
-
-**Example - Multi-Source Graph**:
-```yaml
-# graphs/data-fusion.yaml
-name: data-fusion
-description: |
-  Combines multiple data sources for reporting.
-
-tasks:
-  # Two independent tasks can run in parallel
-  - task: load-market-data  # Global task
-  
-  - name: load-customer-data
-    type: dbt
-    config:
-      project: analytics
-      models: +customer_data
-  
-  # This task waits for both
-  - name: join-datasets
-    type: bq_extract
-    config:
-      query: |
-        SELECT * FROM market_data m
-        JOIN customer_data c ON m.customer_id = c.id
-      destination: gs://my-bucket/joined/*.parquet
-    depends_on:
-      - load-market-data
-      - load-customer-data
+      - calculate-var
   
   - name: generate-report
-    type: dataflow
-    config:
-      template: gs://my-bucket/templates/report-generator
-      parameters:
-        input: gs://my-bucket/joined/*.parquet
+    command: python
+    args:
+      - /opt/risk/report.py
+      - --date
+      - "${params.batch_date}"
+      - --var-results
+      - "${task.calculate-var.result.output_file}"
+      - --stress-results
+      - "${task.stress-test.result.output_file}"
     depends_on:
-      - join-datasets
+      - calculate-var
+      - stress-test
 ```
 
-### Validation Rules
+### Example: Configuration
 
-The system must validate YAML configurations on load:
+```yaml
+# application.yaml
+orchestrator:
+  mode: dev
+  
+  config:
+    graphs: ./graphs
+    tasks: ./tasks
+    watch: true
+  
+  dev:
+    worker-threads: 4
+    trial-run: false
+    enable-editor: true
+  
+  storage:
+    events: file://./data/events
+  
+  hazelcast:
+    embedded: true
+    cluster-name: orchestrator-dev
+  
+  worker:
+    threads: 4
+    heartbeat-interval: 10
+    dead-threshold: 60
 
-1. **Task Validation**:
-   - Name matches `^[a-z0-9-]+$` pattern
-   - Type is one of the supported types
-   - Timeout is positive integer
-   - Config structure matches task type requirements
-   - If global=true, task can be referenced by multiple graphs
+server:
+  port: 8080
 
-2. **Graph Validation**:
-   - Name matches `^[a-z0-9-]+$` pattern
-   - At least one task defined
-   - All task references resolve to existing tasks
-   - All `depends_on` references exist in the graph
-   - No circular dependencies (DAG check using JGraphT)
-   - Each task appears at most once in the graph
+logging:
+  level: INFO
+  format: text
 
-3. **Global Task Rules**:
-   - Global tasks can only be defined in `tasks/*.yaml` (not inline in graphs)
-   - Multiple graphs can reference the same global task
-   - When a global task completes, it marks completed for ALL graphs containing it
+---
 
-## Core Components
+# application-prod.yaml
+orchestrator:
+  mode: prod
+  
+  config:
+    graphs: /config/graphs
+    tasks: /config/tasks
+    watch: false
+  
+  storage:
+    events: gs://my-bucket/orchestrator/events
+  
+  hazelcast:
+    embedded: false
+    cluster-name: orchestrator-prod
+    members:
+      - hazelcast-0.hazelcast.orchestrator.svc.cluster.local
+      - hazelcast-1.hazelcast.orchestrator.svc.cluster.local
+      - hazelcast-2.hazelcast.orchestrator.svc.cluster.local
+  
+  worker:
+    threads: 16
+    heartbeat-interval: 10
+    dead-threshold: 60
 
-### Orchestrator Service Components
+server:
+  port: 8080
 
-**Purpose**: Load graph and task definitions from YAML files on startup.
-
-**Lifecycle**: Executes once on application startup.
-
-**Responsibilities**:
-- Read all files matching `tasks/*.yaml` and `graphs/*.yaml`
-- Parse YAML into domain objects
-- Validate configurations
-- Detect circular dependencies using JGraphT
-- Upsert into database via repositories
-- Log warnings for any invalid configurations
-
-**Interface**:
-```java
-@ApplicationScoped
-public class GraphLoader {
-    @Inject TaskRepository taskRepository;
-    @Inject GraphRepository graphRepository;
-    @Inject GraphValidator graphValidator;
-    @Inject Logger logger;
-    
-    @ConfigProperty(name = "orchestrator.config.path")
-    String configPath;
-    
-    void onStart(@Observes StartupEvent event) {
-        logger.info("Loading task and graph definitions from {}", configPath);
-        loadTasks();
-        loadGraphs();
-        logger.info("Configuration loading complete");
-    }
-    
-    private void loadTasks() {
-        Path tasksDir = Path.of(configPath, "tasks");
-        // Load all .yaml files
-        // Parse with SnakeYAML
-        // Validate each task
-        // Upsert via taskRepository
-    }
-    
-    private void loadGraphs() {
-        Path graphsDir = Path.of(configPath, "graphs");
-        // Load all .yaml files
-        // Parse with SnakeYAML
-        // Resolve task references
-        // Validate DAG structure
-        // Upsert via graphRepository
-    }
-}
+logging:
+  level: INFO
+  format: json
 ```
 
-**Error Handling**:
-- Invalid YAML: Log error, skip file, continue loading others
-- Circular dependency: Log error, reject graph, fail startup
-- Missing task reference: Log error, reject graph, fail startup
-- Duplicate names: Log error, reject duplicate, keep first loaded
+---
 
-**Configuration**:
-```properties
-# application.properties
-orchestrator.config.path=/config
-orchestrator.config.reload-on-change=false  # Future: watch for changes
-```
-
-#### 2. ExternalEventConsumer
-
-**Purpose**: Bridge external messaging system (Pub/Sub or Hazelcast) to internal Vert.x event bus.
-
-**Lifecycle**: Runs continuously, consuming from external topics.
-
-**Responsibilities**:
-- Consume messages from `events-topic` (task results)
-- Consume messages from `management-topic` (worker heartbeats, commands)
-- Transform external message formats to internal events
-- Publish to Vert.x event bus
-- Handle deserialization errors gracefully
-
-**Interface**:
-```java
-@ApplicationScoped
-public class ExternalEventConsumer {
-    @Inject EventBus eventBus;
-    @Inject Logger logger;
-    
-    @Incoming("external-events")  // Configured per environment
-    public CompletionStage<Void> onTaskEvent(Message<TaskEventMessage> message) {
-        TaskEventMessage external = message.getPayload();
-        logger.debug("Received task event: {}", external);
-        
-        try {
-            OrchestratorEvent internalEvent = switch(external.status()) {
-                case "STARTED" -> new TaskStartedEvent(
-                    external.executionId(), 
-                    external.workerId()
-                );
-                case "COMPLETED" -> new TaskCompletedEvent(
-                    external.executionId(), 
-                    external.result()
-                );
-                case "FAILED" -> new TaskFailedEvent(
-                    external.executionId(), 
-                    external.errorMessage(),
-                    external.attempt()
-                );
-                default -> {
-                    logger.warn("Unknown task status: {}", external.status());
-                    yield null;
-                }
-            };
-            
-            if (internalEvent != null) {
-                String address = "task." + external.status().toLowerCase();
-                eventBus.publish(address, internalEvent);
-            }
-            
-            return message.ack();
-        } catch (Exception e) {
-            logger.error("Error processing task event", e);
-            return message.nack(e);
-        }
-    }
-    
-    @Incoming("external-management")
-    public CompletionStage<Void> onManagementEvent(Message<ManagementEventMessage> message) {
-        ManagementEventMessage external = message.getPayload();
-        
-        try {
-            if ("HEARTBEAT".equals(external.type())) {
-                eventBus.publish("worker.heartbeat", new WorkerHeartbeatEvent(
-                    external.workerId(),
-                    external.timestamp()
-                ));
-            } else if ("REGISTERED".equals(external.type())) {
-                eventBus.publish("worker.registered", new WorkerRegisteredEvent(
-                    external.workerId(),
-                    external.metadata()
-                ));
-            }
-            
-            return message.ack();
-        } catch (Exception e) {
-            logger.error("Error processing management event", e);
-            return message.nack(e);
-        }
-    }
-}
-```
-
-**Message Formats**:
-
-*TaskEventMessage (from workers)*:
-```json
-{
-  "executionId": "uuid",
-  "taskName": "load-market-data",
-  "status": "COMPLETED|FAILED|STARTED",
-  "workerId": "worker-abc123",
-  "timestamp": "2025-10-17T10:30:00Z",
-  "attempt": 1,
-  "result": {},
-  "errorMessage": "optional error"
-}
-```
-
-*ManagementEventMessage (from workers)*:
-```json
-{
-  "type": "HEARTBEAT|REGISTERED",
-  "workerId": "worker-abc123",
-  "timestamp": "2025-10-17T10:30:00Z",
-  "metadata": {
-    "podIp": "10.0.1.5",
-    "nodeName": "gke-node-1",
-    "capabilities": ["dbt", "bq_extract"]
-  }
-}
-```
-
-#### 3. GraphEvaluator
-
-**Purpose**: Core orchestration logic - evaluate graph state and schedule ready tasks.
-
-**Lifecycle**: Event-driven, triggered by internal events.
-
-**Responsibilities**:
-- Build DAG from graph definition using JGraphT
-- Determine which tasks are ready to execute (dependencies met)
-- Handle global task coordination
-- Detect graph completion or stalling
-- Publish task scheduling events
-
-**Event Listeners**:
-- `task.completed` - Task finished successfully
-- `task.failed` - Task failed
-- `graph.evaluate` - Explicit request to evaluate
-- `task.retry` - Retry a failed task
-
-**Interface**:
-```java
-@ApplicationScoped
-public class GraphEvaluator {
-    @Inject EventBus eventBus;
-    @Inject JGraphTService graphService;
-    @Inject TaskExecutionRepository taskExecutionRepository;
-    @Inject GraphExecutionRepository graphExecutionRepository;
-    @Inject Logger logger;
-    
-    @ConsumeEvent("task.completed")
-    @ConsumeEvent("task.failed")
-    public void onTaskStatusChange(TaskEvent event) {
-        logger.info("Task {} changed to {}", event.executionId(), event.status());
-        
-        // Update database
-        taskExecutionRepository.updateStatus(
-            event.executionId(), 
-            TaskStatus.valueOf(event.status()),
-            event.errorMessage(),
-            event.result()
-        );
-        
-        // Find graph execution(s) to re-evaluate
-        TaskExecution te = taskExecutionRepository.findById(event.executionId());
-        
-        if (te.task().isGlobal()) {
-            // Global task affects multiple graphs
-            List<UUID> affectedGraphs = 
-                taskExecutionRepository.findGraphsContainingTask(te.task().name());
-            
-            logger.info("Global task {} affects {} graphs", 
-                te.task().name(), affectedGraphs.size());
-            
-            affectedGraphs.forEach(graphExecId -> 
-                eventBus.publish("graph.evaluate", graphExecId)
-            );
-        } else {
-            // Single graph affected
-            eventBus.publish("graph.evaluate", te.graphExecutionId());
-        }
-    }
-    
-    @ConsumeEvent("graph.evaluate")
-    @Transactional
-    public void evaluate(UUID graphExecutionId) {
-        logger.debug("Evaluating graph execution {}", graphExecutionId);
-        
-        GraphExecution execution = graphExecutionRepository.findById(graphExecutionId);
-        
-        // Build DAG
-        DirectedAcyclicGraph<Task, DefaultEdge> dag = 
-            graphService.buildDAG(execution.graph());
-        
-        // Get current task states
-        Map<Task, TaskStatus> taskStates = 
-            taskExecutionRepository.getTaskStates(graphExecutionId);
-        
-        // Find tasks ready to execute
-        Set<Task> readyTasks = graphService.findReadyTasks(dag, taskStates);
-        
-        logger.info("Found {} ready tasks for graph {}", 
-            readyTasks.size(), execution.graph().name());
-        
-        // Schedule each ready task
-        for (Task task : readyTasks) {
-            scheduleTask(graphExecutionId, task);
-        }
-        
-        // Check if graph is done
-        updateGraphStatus(graphExecutionId, taskStates, readyTasks);
-        
-        // Publish evaluation complete event
-        eventBus.publish("graph.evaluated", new GraphEvaluatedEvent(
-            graphExecutionId,
-            readyTasks.size()
-        ));
-    }
-    
-    private void scheduleTask(UUID graphExecutionId, Task task) {
-        if (task.isGlobal()) {
-            scheduleGlobalTask(graphExecutionId, task);
-        } else {
-            scheduleRegularTask(graphExecutionId, task);
-        }
-    }
-    
-    private void scheduleGlobalTask(UUID graphExecutionId, Task task) {
-        // Check if global task already running
-        Optional<TaskExecution> running = 
-            taskExecutionRepository.findRunningGlobalExecution(task.name());
-        
-        if (running.isPresent()) {
-            // Link this graph's execution to the running one
-            logger.info("Linking to existing global task execution: {}", 
-                running.get().id());
-            
-            taskExecutionRepository.linkToGlobalExecution(
-                graphExecutionId, 
-                task.id(), 
-                running.get().id()
-            );
-        } else {
-            // Start new global execution
-            scheduleRegularTask(graphExecutionId, task);
-        }
-    }
-    
-    private void scheduleRegularTask(UUID graphExecutionId, Task task) {
-        TaskExecution execution = taskExecutionRepository.create(
-            graphExecutionId,
-            task,
-            TaskStatus.PENDING
-        );
-        
-        logger.info("Scheduling task {} for graph execution {}", 
-            task.name(), graphExecutionId);
-        
-        eventBus.publish("task.ready", new TaskReadyEvent(
-            execution.id(),
-            task
-        ));
-    }
-    
-    private void updateGraphStatus(
-        UUID graphExecutionId, 
-        Map<Task, TaskStatus> taskStates,
-        Set<Task> readyTasks
-    ) {
-        boolean allCompleted = taskStates.values().stream()
-            .allMatch(s -> s == TaskStatus.COMPLETED || s == TaskStatus.SKIPPED);
-        
-        boolean anyFailed = taskStates.values().stream()
-            .anyMatch(s -> s == TaskStatus.FAILED);
-        
-        boolean stalled = readyTasks.isEmpty() && !allCompleted;
-        
-        GraphStatus newStatus;
-        if (allCompleted) {
-            newStatus = GraphStatus.COMPLETED;
-            eventBus.publish("graph.completed", 
-                new GraphCompletedEvent(graphExecutionId));
-        } else if (stalled) {
-            newStatus = GraphStatus.STALLED;
-            eventBus.publish("graph.stalled", 
-                new GraphStalledEvent(graphExecutionId));
-        } else if (anyFailed) {
-            newStatus = GraphStatus.FAILED;
-            eventBus.publish("graph.failed", 
-                new GraphFailedEvent(graphExecutionId));
-        } else {
-            newStatus = GraphStatus.RUNNING;
-        }
-        
-        graphExecutionRepository.updateStatus(graphExecutionId, newStatus);
-    }
-    
-    @ConsumeEvent("task.retry")
-    public void onTaskRetry(TaskReadyEvent event) {
-        logger.info("Retrying task execution {}", event.executionId());
-        
-        TaskExecution te = taskExecutionRepository.findById(event.executionId());
-        
-        if (te.attempt() < te.task().retryPolicy().maxRetries()) {
-            taskExecutionRepository.incrementAttempt(event.executionId());
-            eventBus.publish("task.ready", event);
-        } else {
-            logger.warn("Max retries exceeded for task execution {}", 
-                event.executionId());
-            
-            taskExecutionRepository.updateStatus(
-                event.executionId(),
-                TaskStatus.FAILED,
-                "Max retries exceeded",
-                null
-            );
-            
-            eventBus.publish("task.failed", new TaskFailedEvent(
-                event.executionId(),
-                "Max retries exceeded",
-                te.attempt()
-            ));
-        }
-    }
-}
-```
-
-#### 4. TaskQueuePublisher
-
-**Purpose**: Publish work to the queue for workers to consume.
-
-**Lifecycle**: Event-driven, triggered by "task.ready" events.
-
-**Responsibilities**:
-- Transform internal task events to external work messages
-- Publish to appropriate queue (via QueueService interface)
-- Update task status to QUEUED
-- Handle publishing failures
-
-**Interface**:
-```java
-@ApplicationScoped
-public class TaskQueuePublisher {
-    @Inject EventBus eventBus;
-    @Inject QueueService queueService;
-    @Inject TaskExecutionRepository taskExecutionRepository;
-    @Inject Logger logger;
-    
-    @ConsumeEvent("task.ready")
-    public Uni<Void> onTaskReady(TaskReadyEvent event) {
-        logger.info("Publishing task {} to queue", event.task().name());
-        
-        WorkMessage workMessage = new WorkMessage(
-            event.executionId(),
-            event.task().name(),
-            event.task().type(),
-            event.task().config(),
-            event.task().retryPolicy(),
-            event.task().timeoutSeconds()
-        );
-        
-        return queueService.publishWork(workMessage)
-            .invoke(() -> {
-                taskExecutionRepository.updateStatus(
-                    event.executionId(),
-                    TaskStatus.QUEUED,
-                    null,
-                    null
-                );
-                
-                eventBus.publish("task.queued", new TaskQueuedEvent(
-                    event.executionId(),
-                    event.task()
-                ));
-            })
-            .onFailure().invoke(error -> {
-                logger.error("Failed to publish task to queue", error);
-                
-                // Retry by re-publishing task.ready event after delay
-                Uni.createFrom().voidItem()
-                    .onItem().delayIt().by(Duration.ofSeconds(5))
-                    .subscribe().with(
-                        v -> eventBus.publish("task.ready", event)
-                    );
-            })
-            .replaceWithVoid();
-    }
-}
-```
-
-**WorkMessage Format**:
-```json
-{
-  "executionId": "uuid",
-  "taskName": "load-market-data",
-  "taskType": "dbt",
-  "config": {
-    "project": "analytics",
-    "models": "+market_data"
-  },
-  "retryPolicy": {
-    "maxRetries": 3,
-    "backoff": "exponential",
-    "initialDelaySeconds": 30
-  },
-  "timeoutSeconds": 600
-}
-```
-
-#### 5. WorkerMonitor
-
-**Purpose**: Monitor worker health and recover work from dead workers.
-
-**Lifecycle**: Scheduled task running every 30 seconds.
-
-**Responsibilities**:
-- Check worker heartbeats
-- Mark workers as dead if no heartbeat for 60 seconds
-- Publish "worker.died" events for dead workers
-- Update worker heartbeat timestamps
-
-**Interface**:
-```java
-@ApplicationScoped
-public class WorkerMonitor {
-    @Inject EventBus eventBus;
-    @Inject WorkerRepository workerRepository;
-    @Inject Logger logger;
-    
-    @ConfigProperty(name = "orchestrator.worker.dead-threshold-seconds")
-    int deadThresholdSeconds;
-    
-    @ConsumeEvent("worker.heartbeat")
-    @Transactional
-    public void onHeartbeat(WorkerHeartbeatEvent event) {
-        logger.trace("Heartbeat from worker {}", event.workerId());
-        workerRepository.updateHeartbeat(event.workerId(), event.timestamp());
-    }
-    
-    @ConsumeEvent("worker.registered")
-    @Transactional
-    public void onWorkerRegistered(WorkerRegisteredEvent event) {
-        logger.info("Worker registered: {}", event.workerId());
-        
-        workerRepository.upsert(new Worker(
-            event.workerId(),
-            WorkerStatus.ACTIVE,
-            Instant.now(),
-            Instant.now(),
-            event.metadata()
-        ));
-    }
-    
-    @Scheduled(every = "${orchestrator.worker.monitor-interval}")
-    @Transactional
-    public void checkDeadWorkers() {
-        Instant deadline = Instant.now()
-            .minusSeconds(deadThresholdSeconds);
-        
-        List<Worker> deadWorkers = workerRepository.findDeadWorkers(deadline);
-        
-        if (!deadWorkers.isEmpty()) {
-            logger.warn("Found {} dead workers", deadWorkers.size());
-            
-            for (Worker worker : deadWorkers) {
-                workerRepository.markDead(worker.id());
-                
-                eventBus.publish("worker.died", new WorkerDiedEvent(
-                    worker.id()
-                ));
-            }
-        }
-    }
-}
-```
-
-**Configuration**:
-```properties
-# application.properties
-orchestrator.worker.dead-threshold-seconds=60
-orchestrator.worker.monitor-interval=30s
-```
-
-#### 6. WorkRecoveryService
-
-**Purpose**: Recover work from dead workers.
-
-**Lifecycle**: Event-driven, triggered by "worker.died" events.
-
-**Responsibilities**:
-- Find all tasks assigned to dead worker
-- Retry tasks that haven't exceeded max retries
-- Fail tasks that have exceeded max retries
-- Clean up work assignments
-
-**Interface**:
-```java
-@ApplicationScoped
-public class WorkRecoveryService {
-    @Inject EventBus eventBus;
-    @Inject TaskExecutionRepository taskExecutionRepository;
-    @Inject WorkAssignmentRepository workAssignmentRepository;
-    @Inject Logger logger;
-    
-    @ConsumeEvent("worker.died")
-    @Transactional
-    public void recoverWork(WorkerDiedEvent event) {
-        logger.warn("Recovering work from dead worker: {}", event.workerId());
-        
-        List<TaskExecution> orphanedTasks = 
-            taskExecutionRepository.findByAssignedWorker(event.workerId());
-        
-        logger.info("Found {} orphaned tasks", orphanedTasks.size());
-        
-        for (TaskExecution te : orphanedTasks) {
-            recoverTask(te);
-            workAssignmentRepository.deleteByTaskExecution(te.id());
-        }
-    }
-    
-    private void recoverTask(TaskExecution te) {
-        if (te.attempt() < te.task().retryPolicy().maxRetries()) {
-            logger.info("Retrying task execution {} (attempt {}/{})",
-                te.id(), te.attempt(), te.task().retryPolicy().maxRetries());
-            
-            taskExecutionRepository.resetToPending(te.id());
-            
-            eventBus.publish("task.retry", new TaskReadyEvent(
-                te.id(),
-                te.task()
-            ));
-        } else {
-            logger.warn("Task execution {} exceeded max retries", te.id());
-            
-            taskExecutionRepository.updateStatus(
-                te.id(),
-                TaskStatus.FAILED,
-                "Worker died, max retries exceeded",
-                null
-            );
-            
-            eventBus.publish("task.failed", new TaskFailedEvent(
-                te.id(),
-                "Worker died, max retries exceeded",
-                te.attempt()
-            ));
-        }
-    }
-}
-```
-
-#### 7. JGraphTService
-
-**Purpose**: Build and query DAGs using JGraphT library.
-
-**Lifecycle**: Stateless service, used by GraphEvaluator.
-
-**Responsibilities**:
-- Build DirectedAcyclicGraph from graph definition
-- Detect cycles (throws exception)
-- Find topologically sorted execution order
-- Determine which tasks are ready (all dependencies completed)
-
-**Interface**:
-```java
-@ApplicationScoped
-public class JGraphTService {
-    @Inject Logger logger;
-    
-    /**
-     * Build a DAG from a graph definition.
-     * @throws CycleFoundException if graph contains cycles
-     */
-    public DirectedAcyclicGraph<Task, DefaultEdge> buildDAG(Graph graph) {
-        DirectedAcyclicGraph<Task, DefaultEdge> dag = 
-            new DirectedAcyclicGraph<>(DefaultEdge.class);
-        
-        // Add all tasks as vertices
-        for (Task task : graph.tasks()) {
-            dag.addVertex(task);
-        }
-        
-        // Add edges from dependencies
-        for (GraphEdge edge : graph.edges()) {
-            try {
-                dag.addEdge(edge.fromTask(), edge.toTask());
-            } catch (IllegalArgumentException e) {
-                throw new CycleFoundException(
-                    "Cycle detected in graph: " + graph.name(), e);
-            }
-        }
-        
-        logger.debug("Built DAG for graph {} with {} vertices and {} edges",
-            graph.name(), dag.vertexSet().size(), dag.edgeSet().size());
-        
-        return dag;
-    }
-    
-    /**
-     * Find tasks that are ready to execute.
-     * A task is ready if all its dependencies are COMPLETED or SKIPPED.
-     */
-    public Set<Task> findReadyTasks(
-        DirectedAcyclicGraph<Task, DefaultEdge> dag,
-        Map<Task, TaskStatus> currentStates
-    ) {
-        Set<Task> ready = new HashSet<>();
-        
-        for (Task task : dag.vertexSet()) {
-            TaskStatus status = currentStates.getOrDefault(task, TaskStatus.PENDING);
-            
-            // Skip if already queued, running, completed, or failed
-            if (status != TaskStatus.PENDING) {
-                continue;
-            }
-            
-            // Check if all dependencies are satisfied
-            Set<DefaultEdge> incomingEdges = dag.incomingEdgesOf(task);
-            boolean allDependenciesMet = true;
-            
-            for (DefaultEdge edge : incomingEdges) {
-                Task dependency = dag.getEdgeSource(edge);
-                TaskStatus depStatus = currentStates.get(dependency);
-                
-                if (depStatus != TaskStatus.COMPLETED && depStatus != TaskStatus.SKIPPED) {
-                    allDependenciesMet = false;
-                    break;
-                }
-            }
-            
-            if (allDependenciesMet) {
-                ready.add(task);
-            }
-        }
-        
-        return ready;
-    }
-    
-    /**
-     * Get topological sort of tasks (useful for UI visualization).
-     */
-    public List<Task> getTopologicalOrder(DirectedAcyclicGraph<Task, DefaultEdge> dag) {
-        TopologicalOrderIterator<Task, DefaultEdge> iterator = 
-            new TopologicalOrderIterator<>(dag);
-        
-        List<Task> order = new ArrayList<>();
-        iterator.forEachRemaining(order::add);
-        
-        return order;
-    }
-}
-```
-
-### Worker Pod Components
-
-#### 1. WorkerMain
-
-**Purpose**: Main entry point for worker pod.
-
-**Lifecycle**: Runs continuously until killed.
-
-**Responsibilities**:
-- Register with orchestrator on startup
-- Start heartbeat timer
-- Listen for work from queue
-- Listen for management commands
-- Graceful shutdown
-
-**Interface**:
-```java
-@ApplicationScoped
-public class WorkerMain {
-    @Inject TaskExecutor taskExecutor;
-    @Inject QueueService queueService;
-    @Inject ManagementService managementService;
-    @Inject Logger logger;
-    
-    @ConfigProperty(name = "worker.id")
-    String workerId;  // Defaults to $HOSTNAME
-    
-    @ConfigProperty(name = "worker.heartbeat-interval-seconds")
-    int heartbeatIntervalSeconds;
-    
-    private volatile boolean running = true;
-    
-    void onStart(@Observes StartupEvent event) {
-        logger.info("Worker {} starting", workerId);
-        
-        // Register with orchestrator
-        managementService.register(workerId, getMetadata());
-        
-        // Start heartbeat
-        startHeartbeat();
-        
-        // Start listening for management commands
-        managementService.listenForCommands(this::onManagementCommand);
-        
-        logger.info("Worker {} ready", workerId);
-    }
-    
-    void onStop(@Observes ShutdownEvent event) {
-        logger.info("Worker {} shutting down", workerId);
-        running = false;
-    }
-    
-    @Incoming("work-queue")
-    public CompletionStage<Void> processWork(Message<WorkMessage> message) {
-        if (!running) {
-            logger.warn("Worker shutting down, rejecting work");
-            return message.nack(new IllegalStateException("Worker shutting down"));
-        }
-        
-        WorkMessage work = message.getPayload();
-        logger.info("Received work: task={}, execution={}", 
-            work.taskName(), work.executionId());
-        
-        try {
-            // Register assignment
-            managementService.registerAssignment(work.executionId(), workerId);
-            
-            // Notify started
-            managementService.publishTaskStarted(work.executionId(), workerId);
-            
-            // Execute task
-            TaskResult result = taskExecutor.execute(work);
-            
-            // Publish result
-            if (result.isSuccess()) {
-                managementService.publishTaskCompleted(
-                    work.executionId(), 
-                    workerId,
-                    result.data()
-                );
-            } else {
-                managementService.publishTaskFailed(
-                    work.executionId(),
-                    workerId,
-                    result.error(),
-                    work.attempt()
-                );
-            }
-            
-            return message.ack();
-            
-        } catch (Exception e) {
-            logger.error("Error processing work", e);
-            
-            managementService.publishTaskFailed(
-                work.executionId(),
-                workerId,
-                e.getMessage(),
-                work.attempt()
-            );
-            
-            return message.nack(e);
-        }
-    }
-    
-    private void startHeartbeat() {
-        Executors.newSingleThreadScheduledExecutor().scheduleAtFixedRate(
-            () -> {
-                if (running) {
-                    try {
-                        managementService.sendHeartbeat(workerId);
-                    } catch (Exception e) {
-                        logger.error("Error sending heartbeat", e);
-                    }
-                }
-            },
-            0,
-            heartbeatIntervalSeconds,
-            TimeUnit.SECONDS
-        );
-    }
-    
-    private void onManagementCommand(ManagementCommand cmd) {
-        if ("KILL".equals(cmd.type()) && workerId.equals(cmd.targetWorker())) {
-            logger.warn("Received KILL command, shutting down");
-            running = false;
-            System.exit(0);
-        }
-    }
-    
-    private Map<String, Object> getMetadata() {
-        return Map.of(
-            "podIp", System.getenv().getOrDefault("POD_IP", "unknown"),
-            "nodeName", System.getenv().getOrDefault("NODE_NAME", "unknown"),
-            "capabilities", List.of("dbt", "bq_extract", "dataplex", "dataflow")
-        );
-    }
-}
-```
-
-**Configuration**:
-```properties
-# application.properties
-worker.id=${HOSTNAME}
-worker.heartbeat-interval-seconds=10
-```
-
-#### 2. TaskExecutor
-
-**Purpose**: Dispatch work to appropriate task handlers.
-
-**Lifecycle**: Stateless service.
-
-**Responsibilities**:
-- Route work based on task type
-- Apply timeout enforcement
-- Catch and wrap exceptions
-- Return standardized results
-
-**Interface**:
-```java
-@ApplicationScoped
-public class TaskExecutor {
-    @Inject DbtHandler dbtHandler;
-    @Inject BqExtractHandler bqExtractHandler;
-    @Inject DataplexHandler dataplexHandler;
-    @Inject DataflowHandler dataflowHandler;
-    @Inject Logger logger;
-    
-    public TaskResult execute(WorkMessage work) {
-        logger.info("Executing task: type={}, name={}", 
-            work.taskType(), work.taskName());
-        
-        try {
-            TaskResult result = executeWithTimeout(work);
-            
-            logger.info("Task completed successfully: {}", work.taskName());
-            return result;
-            
-        } catch (TimeoutException e) {
-            logger.error("Task timed out: {}", work.taskName());
-            return TaskResult.failure("Task execution timed out after " + 
-                work.timeoutSeconds() + " seconds");
-                
-        } catch (Exception e) {
-            logger.error("Task failed: " + work.taskName(), e);
-            return TaskResult.failure(e.getMessage());
-        }
-    }
-    
-    private TaskResult executeWithTimeout(WorkMessage work) 
-            throws TimeoutException, InterruptedException, ExecutionException {
-        
-        ExecutorService executor = Executors.newSingleThreadExecutor();
-        
-        Future<TaskResult> future = executor.submit(() -> {
-            return switch(work.taskType()) {
-                case DBT -> dbtHandler.execute(work.config());
-                case BQ_EXTRACT -> bqExtractHandler.execute(work.config());
-                case DATAPLEX -> dataplexHandler.execute(work.config());
-                case DATAFLOW -> dataflowHandler.execute(work.config());
-            };
-        });
-        
-        try {
-            return future.get(work.timeoutSeconds(), TimeUnit.SECONDS);
-        } finally {
-            executor.shutdownNow();
-        }
-    }
-}
-```
-
-#### 3. Task Handlers
-
-Each task type has a dedicated handler. All handlers implement a common interface:
-
-```java
-public interface TaskHandler {
-    TaskResult execute(Map<String, Object> config);
-}
-```
-
-**DbtHandler**:
-```java
-@ApplicationScoped
-public class DbtHandler implements TaskHandler {
-    @Inject Logger logger;
-    
-    @Override
-    public TaskResult execute(Map<String, Object> config) {
-        String project = (String) config.get("project");
-        String models = (String) config.get("models");
-        String target = (String) config.getOrDefault("target", "prod");
-        
-        logger.info("Running DBT: project={}, models={}, target={}", 
-            project, models, target);
-        
-        try {
-            // Execute DBT via CLI
-            ProcessBuilder pb = new ProcessBuilder(
-                "dbt", "run",
-                "--project-dir", "/dbt/" + project,
-                "--models", models,
-                "--target", target
-            );
-            
-            Process process = pb.start();
-            int exitCode = process.waitFor();
-            
-            if (exitCode == 0) {
-                return TaskResult.success(Map.of(
-                    "models_run", extractModelsFromOutput(process)
-                ));
-            } else {
-                String error = new String(process.getErrorStream().readAllBytes());
-                return TaskResult.failure("DBT failed: " + error);
-            }
-            
-        } catch (Exception e) {
-            logger.error("Error executing DBT", e);
-            return TaskResult.failure(e.getMessage());
-        }
-    }
-    
-    private List<String> extractModelsFromOutput(Process process) {
-        // Parse DBT output to get list of models that ran
-        // Implementation details omitted
-        return List.of();
-    }
-}
-```
-
-**BqExtractHandler**:
-```java
-@ApplicationScoped
-public class BqExtractHandler implements TaskHandler {
-    @Inject Logger logger;
-    
-    @Override
-    public TaskResult execute(Map<String, Object> config) {
-        String project = (String) config.get("project");
-        String dataset = (String) config.get("dataset");
-        String table = (String) config.get("table");
-        String destination = (String) config.get("destination");
-        
-        logger.info("Extracting BQ table: {}.{}.{} to {}", 
-            project, dataset, table, destination);
-        
-        try {
-            BigQuery bigquery = BigQueryOptions.newBuilder()
-                .setProjectId(project)
-                .build()
-                .getService();
-            
-            TableId tableId = TableId.of(project, dataset, table);
-            String format = (String) config.getOrDefault("format", "PARQUET");
-            
-            ExtractJobConfiguration configuration = ExtractJobConfiguration.newBuilder(
-                    tableId,
-                    destination
-                )
-                .setFormat(format)
-                .build();
-            
-            Job job = bigquery.create(JobInfo.of(configuration));
-            job = job.waitFor();
-            
-            if (job.getStatus().getError() == null) {
-                return TaskResult.success(Map.of(
-                    "destination", destination,
-                    "bytes_exported", job.getStatistics().toString()
-                ));
-            } else {
-                return TaskResult.failure("BQ Extract failed: " + 
-                    job.getStatus().getError());
-            }
-            
-        } catch (Exception e) {
-            logger.error("Error extracting from BigQuery", e);
-            return TaskResult.failure(e.getMessage());
-        }
-    }
-}
-```
-
-**DataplexHandler** and **DataflowHandler** follow similar patterns, using respective GCP client libraries.
-
-## Interfaces and Abstractions
-
-### Repository Pattern
-
-All data access goes through repository interfaces, allowing easy swapping between implementations.
-
-#### Base Repository Interface
-
-```java
-public interface Repository<T, ID> {
-    T findById(ID id);
-    Optional<T> findByIdOptional(ID id);
-    List<T> findAll();
-    T save(T entity);
-    void delete(ID id);
-}
-```
-
-#### GraphRepository
-
-```java
-public interface GraphRepository extends Repository<Graph, UUID> {
-    Optional<Graph> findByName(String name);
-    Graph upsertFromYaml(String name, String yamlContent);
-    List<Graph> findAll();
-}
-
-@ApplicationScoped
-@RequiresDialect(Database.POSTGRESQL)
-public class PostgresGraphRepository implements GraphRepository {
-    @Inject DataSource dataSource;
-    
-    @Override
-    public Graph findById(UUID id) {
-        // JDBC query
-    }
-    
-    @Override
-    public Graph upsertFromYaml(String name, String yamlContent) {
-        // INSERT ... ON CONFLICT UPDATE
-    }
-}
-
-@ApplicationScoped
-@RequiresDialect(Database.H2)
-public class H2GraphRepository implements GraphRepository {
-    @Inject DataSource dataSource;
-    
-    // H2-specific implementation (MERGE syntax)
-}
-```
-
-#### TaskRepository
-
-```java
-public interface TaskRepository extends Repository<Task, UUID> {
-    Optional<Task> findByName(String name);
-    Task upsertFromYaml(String name, TaskDefinition definition);
-    List<Task> findGlobalTasks();
-}
-```
-
-#### TaskExecutionRepository
-
-```java
-public interface TaskExecutionRepository extends Repository<TaskExecution, UUID> {
-    TaskExecution create(UUID graphExecutionId, Task task, TaskStatus initialStatus);
-    void updateStatus(UUID id, TaskStatus status, String error, Map<String, Object> result);
-    Map<Task, TaskStatus> getTaskStates(UUID graphExecutionId);
-    List<TaskExecution> findByAssignedWorker(String workerId);
-    Optional<TaskExecution> findRunningGlobalExecution(String taskName);
-    void linkToGlobalExecution(UUID graphExecId, UUID taskId, UUID globalExecId);
-    void resetToPending(UUID id);
-    void incrementAttempt(UUID id);
-    List<UUID> findGraphsContainingTask(String taskName);
-}
-```
-
-#### GraphExecutionRepository
-
-```java
-public interface GraphExecutionRepository extends Repository<GraphExecution, UUID> {
-    GraphExecution create(UUID graphId, String triggeredBy);
-    void updateStatus(UUID id, GraphStatus status);
-    GraphExecution getCurrentExecution(UUID graphId);
-    List<GraphExecution> getHistory(UUID graphId, int limit);
-}
-```
-
-#### WorkerRepository
-
-```java
-public interface WorkerRepository extends Repository<Worker, String> {
-    void upsert(Worker worker);
-    void updateHeartbeat(String workerId, Instant timestamp);
-    void markDead(String workerId);
-    List<Worker> findDeadWorkers(Instant deadlineBefore);
-    List<Worker> findActive();
-}
-```
-
-#### WorkAssignmentRepository
-
-```java
-public interface WorkAssignmentRepository {
-    void create(UUID taskExecutionId, String workerId);
-    void deleteByTaskExecution(UUID taskExecutionId);
-    Optional<WorkAssignment> findByTaskExecution(UUID taskExecutionId);
-}
-```
-
-### Queue Abstraction
-
-Queue operations are abstracted behind an interface to support multiple implementations.
-
-#### QueueService Interface
-
-```java
-public interface QueueService {
-    /**
-     * Publish work to the task queue.
-     * Returns a Uni for async/reactive handling.
-     */
-    Uni<Void> publishWork(WorkMessage message);
-    
-    /**
-     * Publish an event (task result).
-     */
-    Uni<Void> publishEvent(TaskEventMessage message);
-    
-    /**
-     * Publish to management topic.
-     */
-    Uni<Void> publishManagement(ManagementEventMessage message);
-}
-```
-
-#### PubSubQueueService (Production)
-
-```java
-@ApplicationScoped
-@RequiresProfile("prod")
-public class PubSubQueueService implements QueueService {
-    @Inject Logger logger;
-    
-    @ConfigProperty(name = "pubsub.project")
-    String projectId;
-    
-    @ConfigProperty(name = "pubsub.topic.work")
-    String workTopicName;
-    
-    @ConfigProperty(name = "pubsub.topic.events")
-    String eventsTopicName;
-    
-    @ConfigProperty(name = "pubsub.topic.management")
-    String managementTopicName;
-    
-    private Publisher workPublisher;
-    private Publisher eventsPublisher;
-    private Publisher managementPublisher;
-    
-    @PostConstruct
-    void init() throws IOException {
-        TopicName workTopic = TopicName.of(projectId, workTopicName);
-        TopicName eventsTopic = TopicName.of(projectId, eventsTopicName);
-        TopicName mgmtTopic = TopicName.of(projectId, managementTopicName);
-        
-        workPublisher = Publisher.newBuilder(workTopic).build();
-        eventsPublisher = Publisher.newBuilder(eventsTopic).build();
-        managementPublisher = Publisher.newBuilder(mgmtTopic).build();
-    }
-    
-    @Override
-    public Uni<Void> publishWork(WorkMessage message) {
-        String json = toJson(message);
-        PubsubMessage pubsubMessage = PubsubMessage.newBuilder()
-            .setData(ByteString.copyFromUtf8(json))
-            .build();
-        
-        return Uni.createFrom().completionStage(
-            workPublisher.publish(pubsubMessage)
-        ).replaceWithVoid();
-    }
-    
-    @Override
-    public Uni<Void> publishEvent(TaskEventMessage message) {
-        String json = toJson(message);
-        PubsubMessage pubsubMessage = PubsubMessage.newBuilder()
-            .setData(ByteString.copyFromUtf8(json))
-            .build();
-        
-        return Uni.createFrom().completionStage(
-            eventsPublisher.publish(pubsubMessage)
-        ).replaceWithVoid();
-    }
-    
-    @Override
-    public Uni<Void> publishManagement(ManagementEventMessage message) {
-        String json = toJson(message);
-        PubsubMessage pubsubMessage = PubsubMessage.newBuilder()
-            .setData(ByteString.copyFromUtf8(json))
-            .build();
-        
-        return Uni.createFrom().completionStage(
-            managementPublisher.publish(pubsubMessage)
-        ).replaceWithVoid();
-    }
-    
-    @PreDestroy
-    void cleanup() {
-        if (workPublisher != null) workPublisher.shutdown();
-        if (eventsPublisher != null) eventsPublisher.shutdown();
-        if (managementPublisher != null) managementPublisher.shutdown();
-    }
-    
-    private String toJson(Object obj) {
-        // Use Jackson or similar
-        return "{}";
-    }
-}
-```
-
-#### HazelcastQueueService (Local Dev)
-
-```java
-@ApplicationScoped
-@RequiresProfile("dev")
-public class HazelcastQueueService implements QueueService {
-    @Inject Logger
+**END OF DESIGN DOCUMENT**
