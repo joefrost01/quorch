@@ -178,5 +178,125 @@
     "crumbs": [
       "Introduction"
     ]
+  },
+  {
+    "objectID": "expressions.html",
+    "href": "expressions.html",
+    "title": "Expression Language Guide",
+    "section": "",
+    "text": "The orchestrator uses Apache Commons JEXL 3 for dynamic expression evaluation. Expressions allow you to parameterize your workflows and make them adaptable to different contexts.\n\n\nExpressions are wrapped in ${ }:\ncommand: echo\nargs:\n  - \"Hello ${params.name}\"\nIf a string doesn’t contain ${ }, it’s treated as a literal value.\n\n\n\n\n\nAccess workflow parameters with params:\nargs:\n  - --date\n  - \"${params.batch_date}\"\n  - --region\n  - \"${params.region}\"\n\n\n\nAccess environment variables with env:\nenv:\n  API_KEY: \"${env.API_KEY}\"\n  DATABASE_URL: \"${env.DATABASE_URL}\"\n\n\n\nAccess results from upstream tasks with task:\nargs:\n  - --row-count\n  - \"${task.extract.result.row_count}\"\n  - --output\n  - \"${task.extract.result.output_file}\"\n\n\n\n\n\n\nenv:\n  BATCH_SIZE: \"${params.scale * 100}\"\n  WORKER_COUNT: \"${params.scale * 4}\"\n  TOTAL: \"${params.a + params.b}\"\n  PERCENT: \"${params.value / params.total * 100}\"\n\n\n\n# Equal\ncondition: \"${params.env == 'prod'}\"\n\n# Not equal\ncondition: \"${params.status != 'failed'}\"\n\n# Greater than / less than\ncondition: \"${params.count &gt; 100}\"\ncondition: \"${params.age &gt;= 18}\"\n\n\n\n# AND\ncondition: \"${params.enabled && params.ready}\"\n\n# OR\ncondition: \"${params.force || params.override}\"\n\n# NOT\ncondition: \"${!params.disabled}\"\n\n\n\nargs:\n  - \"${params.full_refresh ? '--full-refresh' : '--incremental'}\"\n  \nenv:\n  MODE: \"${params.env == 'prod' ? 'production' : 'development'}\"\n  PARALLELISM: \"${params.scale &gt; 10 ? 32 : params.scale &gt; 5 ? 16 : 4}\"\n\n\n\n\n\n\nenv:\n  TABLE_NAME: \"${'data_' + params.region + '_' + params.date}\"\n  OUTPUT_PATH: \"${params.bucket + '/' + params.path}\"\n\n\n\n# Convert to uppercase\nenv:\n  ENV_UPPER: \"${params.env.toUpperCase()}\"\n\n# Convert to lowercase\nenv:\n  ENV_LOWER: \"${params.env.toLowerCase()}\"\n\n# Replace characters\nenv:\n  DATE_UNDERSCORED: \"${params.date.replace('-', '_')}\"\n\n# Trim whitespace\nenv:\n  CLEAN_VALUE: \"${params.value.trim()}\"\n\n\n\nEmbed multiple expressions in a single string:\nargs:\n  - \"gs://bucket-${params.region}/data/${params.date}/file.csv\"\n  - \"Processing ${params.count} records for ${params.client}\"\n\n\n\n\n\n\nUse ?. to safely access nested properties:\n# Won't throw if config, api, or key is null\nenv:\n  API_KEY: \"${params.config?.api?.key}\"\n\n\n\nProvide default values for null or missing variables:\nenv:\n  REGION: \"${params.region ?: 'us'}\"\n  TIMEOUT: \"${params.timeout ?: 300}\"\n  API_URL: \"${env.API_URL ?: 'https://api.default.com'}\"\n\n\n\n\n\n\n\n\nGet today’s date in ISO format (yyyy-MM-dd):\nparams:\n  batch_date:\n    default: \"${date.today()}\"\n\n\n\nGet current date/time with custom formatting:\nenv:\n  TIMESTAMP: \"${date.now('yyyy-MM-dd HH:mm:ss')}\"\n  DATE_PATH: \"${date.now('yyyy/MM/dd')}\"\n\n\n\nAdd time to a date:\nparams:\n  tomorrow:\n    default: \"${date.add(date.today(), 1, 'days')}\"\n  next_week:\n    default: \"${date.add(date.today(), 7, 'days')}\"\n  next_month:\n    default: \"${date.add(date.today(), 1, 'months')}\"\nUnits: days, weeks, months, years\n\n\n\nSubtract time from a date:\nparams:\n  yesterday:\n    default: \"${date.sub(date.today(), 1, 'days')}\"\n  last_week:\n    default: \"${date.sub(date.today(), 7, 'days')}\"\n\n\n\nFormat a date string:\nenv:\n  DATE_SLASH: \"${date.format(params.date, 'yyyy/MM/dd')}\"\n  DATE_READABLE: \"${date.format(params.date, 'dd-MMM-yyyy')}\"\n\n\n\nCalculate days between two dates:\nenv:\n  DAYS_DIFF: \"${date.daysBetween('2025-10-01', '2025-10-17')}\"\n\n\n\nCompare dates:\ncondition: \"${date.isBefore(params.date, '2025-12-31')}\"\n\n\n\n\n\n\nGenerate a random UUID:\nenv:\n  RUN_ID: \"${string.uuid()}\"\n  TRACE_ID: \"${string.uuid()}\"\n\n\n\nConvert text to URL-safe slug:\nenv:\n  WORKFLOW_SLUG: \"${string.slugify('My Workflow Name')}\"\n  # Result: \"my-workflow-name\"\n\n\n\nJoin multiple strings:\nenv:\n  PATH: \"${string.join('/', params.bucket, params.path, params.file)}\"\n\n\n\nPad strings to a specific length:\nenv:\n  ORDER_ID: \"${string.padLeft(params.id, 8, '0')}\"\n  # \"42\" becomes \"00000042\"\n\n\n\nConvert to snake_case:\nenv:\n  VAR_NAME: \"${string.toSnakeCase('myVariableName')}\"\n  # Result: \"my_variable_name\"\n\n\n\nConvert to camelCase:\nenv:\n  VAR_NAME: \"${string.toCamelCase('my_variable_name')}\"\n  # Result: \"myVariableName\"\n\n\n\n\nAccess standard Java Math functions:\nenv:\n  ROUNDED: \"${Math.round(3.7)}\"           # 4\n  FLOOR: \"${Math.floor(3.7)}\"             # 3.0\n  CEIL: \"${Math.ceil(3.2)}\"               # 4.0\n  MAX: \"${Math.max(params.a, params.b)}\"  # larger value\n  MIN: \"${Math.min(params.a, params.b)}\"  # smaller value\n  ABS: \"${Math.abs(params.value)}\"        # absolute value\n\n\n\n\n\n\nargs:\n  - --input\n  - \"gs://${params.bucket}/raw/${params.date}/*.parquet\"\n  - --output\n  - \"gs://${params.bucket}/processed/${params.date}/\"\n\n\n\nargs:\n  - dbt\n  - run\n  - \"${params.full_refresh ? '--full-refresh' : ''}\"\n  - \"${params.threads ? '--threads' : ''}\"\n  - \"${params.threads ?: ''}\"\n\n\n\nenv:\n  DATABASE_URL: \"${params.env == 'prod' ? env.PROD_DB_URL : env.DEV_DB_URL}\"\n  LOG_LEVEL: \"${params.env == 'prod' ? 'INFO' : 'DEBUG'}\"\n  WORKERS: \"${params.env == 'prod' ? 16 : 4}\"\n\n\n\nargs:\n  - --partition\n  - \"${date.format(params.date, 'yyyy/MM/dd')}\"\n  - --date-range\n  - \"${date.sub(params.date, 7, 'days')}\"\n  - to\n  - \"${params.date}\"\n\n\n\nkey: \"load_${params.dataset}_${params.date}_${params.region}\"\n\n\n\nparams:\n  batch_date:\n    default: \"${params.override_date ?: date.today()}\"\n  \n  timeout:\n    default: \"${params.custom_timeout ?: env.DEFAULT_TIMEOUT ?: 3600}\"\n\n\n\nenv:\n  # Calculate memory allocation based on scale\n  MEMORY_GB: \"${Math.min(Math.max(params.scale * 2, 4), 64)}\"\n  \n  # Dynamic parallelism\n  PARALLELISM: \"${params.dataset == 'large' ? 32 : params.dataset == 'medium' ? 16 : 8}\"\n\n\n\n\n\n\nGood:\nenv:\n  DATE: \"${params.date}\"\n  REGION: \"${params.region}\"\nAvoid:\nenv:\n  COMPLEX: \"${params.a + params.b * params.c &gt; 100 ? 'high' : params.d ? 'medium' : 'low'}\"\nFor complex logic, break it into multiple parameters or use task code.\n\n\n\nGood:\nparams:\n  batch_date:\n    default: \"${date.today()}\"\n  processing_region:\n    default: \"us\"\nAvoid:\nparams:\n  d:\n    default: \"${date.today()}\"\n  r:\n    default: \"us\"\n\n\n\nAlways mark required parameters explicitly:\nparams:\n  batch_date:\n    type: string\n    required: true\n    description: \"Processing date in YYYY-MM-DD format\"\n\n\n\nAdd descriptions to parameters with complex defaults:\nparams:\n  lookback_date:\n    type: string\n    default: \"${date.sub(date.today(), 7, 'days')}\"\n    description: \"Date 7 days ago for lookback window\"\n\n\n\nProvide sensible defaults:\nparams:\n  timeout:\n    default: \"${params.custom_timeout ?: env.DEFAULT_TIMEOUT ?: 3600}\"\n    description: \"Task timeout in seconds (default: 1 hour)\"\n\n\n\nUse trial run mode to verify expressions evaluate correctly:\n# Enable trial run in application-dev.yaml\norchestrator:\n  dev:\n    trial-run: true\n\n\n\n\n\n\nProblem: Expression evaluates to null\nSolutions: - Check variable names are spelled correctly - Verify the variable exists in context (params, env, task) - Use elvis operator for default: ${params.value ?: 'default'} - Use null-safe navigation: ${params.config?.api?.key}\n\n\n\nProblem: Failed to evaluate expression error\nSolutions: - Ensure expression is wrapped in ${ } - Check for balanced braces and quotes - Verify function names are correct - Test with simpler expression first\n\n\n\nProblem: Operation fails due to type mismatch\nSolutions: - Use explicit type conversion if needed - Check parameter types in definition - Remember that all params are initially strings from YAML\n\n\n\nProblem: URLs with :// cause parsing errors\nSolution: This is handled automatically - the evaluator correctly handles strings like:\n\"gs://bucket-${params.region}/data/${params.date}/file.csv\"\n\n\n\n\n\nExpression Caching: Up to 512 compiled expressions are cached automatically\nRepeated Evaluations: Same expressions in loops benefit from caching\nComplex Expressions: Break very complex expressions into multiple simpler ones\nString Concatenation: Multiple small concatenations are optimized by JEXL\n\n\n\n\n\nExpressions run with unrestricted permissions for flexibility\nOnly use trusted YAML configurations\nAvoid exposing sensitive data in expression results that might be logged\nUse environment variables for secrets, not parameters",
+    "crumbs": [
+      "Expression Reference"
+    ]
+  },
+  {
+    "objectID": "expressions.html#basic-syntax",
+    "href": "expressions.html#basic-syntax",
+    "title": "Expression Language Guide",
+    "section": "",
+    "text": "Expressions are wrapped in ${ }:\ncommand: echo\nargs:\n  - \"Hello ${params.name}\"\nIf a string doesn’t contain ${ }, it’s treated as a literal value.",
+    "crumbs": [
+      "Expression Reference"
+    ]
+  },
+  {
+    "objectID": "expressions.html#variables",
+    "href": "expressions.html#variables",
+    "title": "Expression Language Guide",
+    "section": "",
+    "text": "Access workflow parameters with params:\nargs:\n  - --date\n  - \"${params.batch_date}\"\n  - --region\n  - \"${params.region}\"\n\n\n\nAccess environment variables with env:\nenv:\n  API_KEY: \"${env.API_KEY}\"\n  DATABASE_URL: \"${env.DATABASE_URL}\"\n\n\n\nAccess results from upstream tasks with task:\nargs:\n  - --row-count\n  - \"${task.extract.result.row_count}\"\n  - --output\n  - \"${task.extract.result.output_file}\"",
+    "crumbs": [
+      "Expression Reference"
+    ]
+  },
+  {
+    "objectID": "expressions.html#operators",
+    "href": "expressions.html#operators",
+    "title": "Expression Language Guide",
+    "section": "",
+    "text": "env:\n  BATCH_SIZE: \"${params.scale * 100}\"\n  WORKER_COUNT: \"${params.scale * 4}\"\n  TOTAL: \"${params.a + params.b}\"\n  PERCENT: \"${params.value / params.total * 100}\"\n\n\n\n# Equal\ncondition: \"${params.env == 'prod'}\"\n\n# Not equal\ncondition: \"${params.status != 'failed'}\"\n\n# Greater than / less than\ncondition: \"${params.count &gt; 100}\"\ncondition: \"${params.age &gt;= 18}\"\n\n\n\n# AND\ncondition: \"${params.enabled && params.ready}\"\n\n# OR\ncondition: \"${params.force || params.override}\"\n\n# NOT\ncondition: \"${!params.disabled}\"\n\n\n\nargs:\n  - \"${params.full_refresh ? '--full-refresh' : '--incremental'}\"\n  \nenv:\n  MODE: \"${params.env == 'prod' ? 'production' : 'development'}\"\n  PARALLELISM: \"${params.scale &gt; 10 ? 32 : params.scale &gt; 5 ? 16 : 4}\"",
+    "crumbs": [
+      "Expression Reference"
+    ]
+  },
+  {
+    "objectID": "expressions.html#string-operations",
+    "href": "expressions.html#string-operations",
+    "title": "Expression Language Guide",
+    "section": "",
+    "text": "env:\n  TABLE_NAME: \"${'data_' + params.region + '_' + params.date}\"\n  OUTPUT_PATH: \"${params.bucket + '/' + params.path}\"\n\n\n\n# Convert to uppercase\nenv:\n  ENV_UPPER: \"${params.env.toUpperCase()}\"\n\n# Convert to lowercase\nenv:\n  ENV_LOWER: \"${params.env.toLowerCase()}\"\n\n# Replace characters\nenv:\n  DATE_UNDERSCORED: \"${params.date.replace('-', '_')}\"\n\n# Trim whitespace\nenv:\n  CLEAN_VALUE: \"${params.value.trim()}\"\n\n\n\nEmbed multiple expressions in a single string:\nargs:\n  - \"gs://bucket-${params.region}/data/${params.date}/file.csv\"\n  - \"Processing ${params.count} records for ${params.client}\"",
+    "crumbs": [
+      "Expression Reference"
+    ]
+  },
+  {
+    "objectID": "expressions.html#null-safety",
+    "href": "expressions.html#null-safety",
+    "title": "Expression Language Guide",
+    "section": "",
+    "text": "Use ?. to safely access nested properties:\n# Won't throw if config, api, or key is null\nenv:\n  API_KEY: \"${params.config?.api?.key}\"\n\n\n\nProvide default values for null or missing variables:\nenv:\n  REGION: \"${params.region ?: 'us'}\"\n  TIMEOUT: \"${params.timeout ?: 300}\"\n  API_URL: \"${env.API_URL ?: 'https://api.default.com'}\"",
+    "crumbs": [
+      "Expression Reference"
+    ]
+  },
+  {
+    "objectID": "expressions.html#built-in-functions",
+    "href": "expressions.html#built-in-functions",
+    "title": "Expression Language Guide",
+    "section": "",
+    "text": "Get today’s date in ISO format (yyyy-MM-dd):\nparams:\n  batch_date:\n    default: \"${date.today()}\"\n\n\n\nGet current date/time with custom formatting:\nenv:\n  TIMESTAMP: \"${date.now('yyyy-MM-dd HH:mm:ss')}\"\n  DATE_PATH: \"${date.now('yyyy/MM/dd')}\"\n\n\n\nAdd time to a date:\nparams:\n  tomorrow:\n    default: \"${date.add(date.today(), 1, 'days')}\"\n  next_week:\n    default: \"${date.add(date.today(), 7, 'days')}\"\n  next_month:\n    default: \"${date.add(date.today(), 1, 'months')}\"\nUnits: days, weeks, months, years\n\n\n\nSubtract time from a date:\nparams:\n  yesterday:\n    default: \"${date.sub(date.today(), 1, 'days')}\"\n  last_week:\n    default: \"${date.sub(date.today(), 7, 'days')}\"\n\n\n\nFormat a date string:\nenv:\n  DATE_SLASH: \"${date.format(params.date, 'yyyy/MM/dd')}\"\n  DATE_READABLE: \"${date.format(params.date, 'dd-MMM-yyyy')}\"\n\n\n\nCalculate days between two dates:\nenv:\n  DAYS_DIFF: \"${date.daysBetween('2025-10-01', '2025-10-17')}\"\n\n\n\nCompare dates:\ncondition: \"${date.isBefore(params.date, '2025-12-31')}\"\n\n\n\n\n\n\nGenerate a random UUID:\nenv:\n  RUN_ID: \"${string.uuid()}\"\n  TRACE_ID: \"${string.uuid()}\"\n\n\n\nConvert text to URL-safe slug:\nenv:\n  WORKFLOW_SLUG: \"${string.slugify('My Workflow Name')}\"\n  # Result: \"my-workflow-name\"\n\n\n\nJoin multiple strings:\nenv:\n  PATH: \"${string.join('/', params.bucket, params.path, params.file)}\"\n\n\n\nPad strings to a specific length:\nenv:\n  ORDER_ID: \"${string.padLeft(params.id, 8, '0')}\"\n  # \"42\" becomes \"00000042\"\n\n\n\nConvert to snake_case:\nenv:\n  VAR_NAME: \"${string.toSnakeCase('myVariableName')}\"\n  # Result: \"my_variable_name\"\n\n\n\nConvert to camelCase:\nenv:\n  VAR_NAME: \"${string.toCamelCase('my_variable_name')}\"\n  # Result: \"myVariableName\"\n\n\n\n\nAccess standard Java Math functions:\nenv:\n  ROUNDED: \"${Math.round(3.7)}\"           # 4\n  FLOOR: \"${Math.floor(3.7)}\"             # 3.0\n  CEIL: \"${Math.ceil(3.2)}\"               # 4.0\n  MAX: \"${Math.max(params.a, params.b)}\"  # larger value\n  MIN: \"${Math.min(params.a, params.b)}\"  # smaller value\n  ABS: \"${Math.abs(params.value)}\"        # absolute value",
+    "crumbs": [
+      "Expression Reference"
+    ]
+  },
+  {
+    "objectID": "expressions.html#common-patterns",
+    "href": "expressions.html#common-patterns",
+    "title": "Expression Language Guide",
+    "section": "",
+    "text": "args:\n  - --input\n  - \"gs://${params.bucket}/raw/${params.date}/*.parquet\"\n  - --output\n  - \"gs://${params.bucket}/processed/${params.date}/\"\n\n\n\nargs:\n  - dbt\n  - run\n  - \"${params.full_refresh ? '--full-refresh' : ''}\"\n  - \"${params.threads ? '--threads' : ''}\"\n  - \"${params.threads ?: ''}\"\n\n\n\nenv:\n  DATABASE_URL: \"${params.env == 'prod' ? env.PROD_DB_URL : env.DEV_DB_URL}\"\n  LOG_LEVEL: \"${params.env == 'prod' ? 'INFO' : 'DEBUG'}\"\n  WORKERS: \"${params.env == 'prod' ? 16 : 4}\"\n\n\n\nargs:\n  - --partition\n  - \"${date.format(params.date, 'yyyy/MM/dd')}\"\n  - --date-range\n  - \"${date.sub(params.date, 7, 'days')}\"\n  - to\n  - \"${params.date}\"\n\n\n\nkey: \"load_${params.dataset}_${params.date}_${params.region}\"\n\n\n\nparams:\n  batch_date:\n    default: \"${params.override_date ?: date.today()}\"\n  \n  timeout:\n    default: \"${params.custom_timeout ?: env.DEFAULT_TIMEOUT ?: 3600}\"\n\n\n\nenv:\n  # Calculate memory allocation based on scale\n  MEMORY_GB: \"${Math.min(Math.max(params.scale * 2, 4), 64)}\"\n  \n  # Dynamic parallelism\n  PARALLELISM: \"${params.dataset == 'large' ? 32 : params.dataset == 'medium' ? 16 : 8}\"",
+    "crumbs": [
+      "Expression Reference"
+    ]
+  },
+  {
+    "objectID": "expressions.html#best-practices",
+    "href": "expressions.html#best-practices",
+    "title": "Expression Language Guide",
+    "section": "",
+    "text": "Good:\nenv:\n  DATE: \"${params.date}\"\n  REGION: \"${params.region}\"\nAvoid:\nenv:\n  COMPLEX: \"${params.a + params.b * params.c &gt; 100 ? 'high' : params.d ? 'medium' : 'low'}\"\nFor complex logic, break it into multiple parameters or use task code.\n\n\n\nGood:\nparams:\n  batch_date:\n    default: \"${date.today()}\"\n  processing_region:\n    default: \"us\"\nAvoid:\nparams:\n  d:\n    default: \"${date.today()}\"\n  r:\n    default: \"us\"\n\n\n\nAlways mark required parameters explicitly:\nparams:\n  batch_date:\n    type: string\n    required: true\n    description: \"Processing date in YYYY-MM-DD format\"\n\n\n\nAdd descriptions to parameters with complex defaults:\nparams:\n  lookback_date:\n    type: string\n    default: \"${date.sub(date.today(), 7, 'days')}\"\n    description: \"Date 7 days ago for lookback window\"\n\n\n\nProvide sensible defaults:\nparams:\n  timeout:\n    default: \"${params.custom_timeout ?: env.DEFAULT_TIMEOUT ?: 3600}\"\n    description: \"Task timeout in seconds (default: 1 hour)\"\n\n\n\nUse trial run mode to verify expressions evaluate correctly:\n# Enable trial run in application-dev.yaml\norchestrator:\n  dev:\n    trial-run: true",
+    "crumbs": [
+      "Expression Reference"
+    ]
+  },
+  {
+    "objectID": "expressions.html#troubleshooting",
+    "href": "expressions.html#troubleshooting",
+    "title": "Expression Language Guide",
+    "section": "",
+    "text": "Problem: Expression evaluates to null\nSolutions: - Check variable names are spelled correctly - Verify the variable exists in context (params, env, task) - Use elvis operator for default: ${params.value ?: 'default'} - Use null-safe navigation: ${params.config?.api?.key}\n\n\n\nProblem: Failed to evaluate expression error\nSolutions: - Ensure expression is wrapped in ${ } - Check for balanced braces and quotes - Verify function names are correct - Test with simpler expression first\n\n\n\nProblem: Operation fails due to type mismatch\nSolutions: - Use explicit type conversion if needed - Check parameter types in definition - Remember that all params are initially strings from YAML\n\n\n\nProblem: URLs with :// cause parsing errors\nSolution: This is handled automatically - the evaluator correctly handles strings like:\n\"gs://bucket-${params.region}/data/${params.date}/file.csv\"",
+    "crumbs": [
+      "Expression Reference"
+    ]
+  },
+  {
+    "objectID": "expressions.html#performance-considerations",
+    "href": "expressions.html#performance-considerations",
+    "title": "Expression Language Guide",
+    "section": "",
+    "text": "Expression Caching: Up to 512 compiled expressions are cached automatically\nRepeated Evaluations: Same expressions in loops benefit from caching\nComplex Expressions: Break very complex expressions into multiple simpler ones\nString Concatenation: Multiple small concatenations are optimized by JEXL",
+    "crumbs": [
+      "Expression Reference"
+    ]
+  },
+  {
+    "objectID": "expressions.html#security-notes",
+    "href": "expressions.html#security-notes",
+    "title": "Expression Language Guide",
+    "section": "",
+    "text": "Expressions run with unrestricted permissions for flexibility\nOnly use trusted YAML configurations\nAvoid exposing sensitive data in expression results that might be logged\nUse environment variables for secrets, not parameters",
+    "crumbs": [
+      "Expression Reference"
+    ]
   }
 ]
