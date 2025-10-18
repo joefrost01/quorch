@@ -8,6 +8,7 @@ import com.hazelcast.core.HazelcastInstance;
 import io.quarkus.runtime.Startup;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Produces;
+import jakarta.inject.Singleton;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.neuralchilli.quorch.domain.Parameter;
 import org.neuralchilli.quorch.domain.TaskReference;
@@ -27,7 +28,7 @@ public class HazelcastConfig {
     String clusterName;
 
     @Produces
-    @ApplicationScoped
+    @Singleton
     @Startup
     public HazelcastInstance hazelcastInstance() {
         log.info("Initializing Hazelcast with cluster name: {}", clusterName);
@@ -39,23 +40,25 @@ public class HazelcastConfig {
         config.getNetworkConfig().getJoin().getMulticastConfig().setEnabled(false);
         config.getNetworkConfig().getJoin().getTcpIpConfig().setEnabled(false);
 
-        // Configure serialization BEFORE registering serializers
+        // Configure serialization
         SerializationConfig serializationConfig = config.getSerializationConfig();
 
-        // Disable compact serialization auto-detection for our types
-        serializationConfig.setAllowUnsafe(true);
+        // Disable all auto-serialization mechanisms
         serializationConfig.setEnableCompression(false);
         serializationConfig.setEnableSharedObject(false);
 
-        // Register custom serializers with explicit configuration
+        // Set global serializers to use StreamSerializer for everything not explicitly configured
+        serializationConfig.setCheckClassDefErrors(false);
+
+        // Register custom serializers with HIGH priority (lower number = higher priority)
         SerializerConfig paramConfig = new SerializerConfig();
         paramConfig.setTypeClass(Parameter.class);
-        paramConfig.setImplementation(new HazelcastSerializers.ParameterSerializer());
+        paramConfig.setClass(HazelcastSerializers.ParameterSerializer.class);
         serializationConfig.addSerializerConfig(paramConfig);
 
         SerializerConfig taskRefConfig = new SerializerConfig();
         taskRefConfig.setTypeClass(TaskReference.class);
-        taskRefConfig.setImplementation(new HazelcastSerializers.TaskReferenceSerializer());
+        taskRefConfig.setClass(HazelcastSerializers.TaskReferenceSerializer.class);
         serializationConfig.addSerializerConfig(taskRefConfig);
 
         log.info("Registered custom serializers for Parameter and TaskReference");
