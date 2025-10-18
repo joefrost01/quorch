@@ -22,6 +22,8 @@ website:
     - contents:
         - text: "Introduction"
           href: index.qmd
+        - text: "Expression Reference"
+          href: expressions.qmd
 
 # Theme configuration
 format:

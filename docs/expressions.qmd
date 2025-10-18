@@ -1,0 +1,516 @@
+# Expression Language Guide
+
+The orchestrator uses Apache Commons JEXL 3 for dynamic expression evaluation. Expressions allow you to parameterize your workflows and make them adaptable to different contexts.
+
+## Basic Syntax
+
+Expressions are wrapped in `${ }`:
+
+```yaml
+command: echo
+args:
+  - "Hello ${params.name}"
+```
+
+If a string doesn't contain `${ }`, it's treated as a literal value.
+
+## Variables
+
+### Parameters
+
+Access workflow parameters with `params`:
+
+```yaml
+args:
+  - --date
+  - "${params.batch_date}"
+  - --region
+  - "${params.region}"
+```
+
+### Environment Variables
+
+Access environment variables with `env`:
+
+```yaml
+env:
+  API_KEY: "${env.API_KEY}"
+  DATABASE_URL: "${env.DATABASE_URL}"
+```
+
+### Task Results
+
+Access results from upstream tasks with `task`:
+
+```yaml
+args:
+  - --row-count
+  - "${task.extract.result.row_count}"
+  - --output
+  - "${task.extract.result.output_file}"
+```
+
+## Operators
+
+### Arithmetic
+
+```yaml
+env:
+  BATCH_SIZE: "${params.scale * 100}"
+  WORKER_COUNT: "${params.scale * 4}"
+  TOTAL: "${params.a + params.b}"
+  PERCENT: "${params.value / params.total * 100}"
+```
+
+### Comparison
+
+```yaml
+# Equal
+condition: "${params.env == 'prod'}"
+
+# Not equal
+condition: "${params.status != 'failed'}"
+
+# Greater than / less than
+condition: "${params.count > 100}"
+condition: "${params.age >= 18}"
+```
+
+### Logical
+
+```yaml
+# AND
+condition: "${params.enabled && params.ready}"
+
+# OR
+condition: "${params.force || params.override}"
+
+# NOT
+condition: "${!params.disabled}"
+```
+
+### Ternary (Conditional)
+
+```yaml
+args:
+  - "${params.full_refresh ? '--full-refresh' : '--incremental'}"
+  
+env:
+  MODE: "${params.env == 'prod' ? 'production' : 'development'}"
+  PARALLELISM: "${params.scale > 10 ? 32 : params.scale > 5 ? 16 : 4}"
+```
+
+## String Operations
+
+### Concatenation
+
+```yaml
+env:
+  TABLE_NAME: "${'data_' + params.region + '_' + params.date}"
+  OUTPUT_PATH: "${params.bucket + '/' + params.path}"
+```
+
+### String Methods
+
+```yaml
+# Convert to uppercase
+env:
+  ENV_UPPER: "${params.env.toUpperCase()}"
+
+# Convert to lowercase
+env:
+  ENV_LOWER: "${params.env.toLowerCase()}"
+
+# Replace characters
+env:
+  DATE_UNDERSCORED: "${params.date.replace('-', '_')}"
+
+# Trim whitespace
+env:
+  CLEAN_VALUE: "${params.value.trim()}"
+```
+
+### String Interpolation
+
+Embed multiple expressions in a single string:
+
+```yaml
+args:
+  - "gs://bucket-${params.region}/data/${params.date}/file.csv"
+  - "Processing ${params.count} records for ${params.client}"
+```
+
+## Null Safety
+
+### Null-Safe Navigation
+
+Use `?.` to safely access nested properties:
+
+```yaml
+# Won't throw if config, api, or key is null
+env:
+  API_KEY: "${params.config?.api?.key}"
+```
+
+### Elvis Operator
+
+Provide default values for null or missing variables:
+
+```yaml
+env:
+  REGION: "${params.region ?: 'us'}"
+  TIMEOUT: "${params.timeout ?: 300}"
+  API_URL: "${env.API_URL ?: 'https://api.default.com'}"
+```
+
+## Built-in Functions
+
+### Date Functions
+
+#### `date.today()`
+Get today's date in ISO format (yyyy-MM-dd):
+
+```yaml
+params:
+  batch_date:
+    default: "${date.today()}"
+```
+
+#### `date.now(pattern)`
+Get current date/time with custom formatting:
+
+```yaml
+env:
+  TIMESTAMP: "${date.now('yyyy-MM-dd HH:mm:ss')}"
+  DATE_PATH: "${date.now('yyyy/MM/dd')}"
+```
+
+#### `date.add(date, amount, unit)`
+Add time to a date:
+
+```yaml
+params:
+  tomorrow:
+    default: "${date.add(date.today(), 1, 'days')}"
+  next_week:
+    default: "${date.add(date.today(), 7, 'days')}"
+  next_month:
+    default: "${date.add(date.today(), 1, 'months')}"
+```
+
+Units: `days`, `weeks`, `months`, `years`
+
+#### `date.sub(date, amount, unit)`
+Subtract time from a date:
+
+```yaml
+params:
+  yesterday:
+    default: "${date.sub(date.today(), 1, 'days')}"
+  last_week:
+    default: "${date.sub(date.today(), 7, 'days')}"
+```
+
+#### `date.format(date, pattern)`
+Format a date string:
+
+```yaml
+env:
+  DATE_SLASH: "${date.format(params.date, 'yyyy/MM/dd')}"
+  DATE_READABLE: "${date.format(params.date, 'dd-MMM-yyyy')}"
+```
+
+#### `date.daysBetween(startDate, endDate)`
+Calculate days between two dates:
+
+```yaml
+env:
+  DAYS_DIFF: "${date.daysBetween('2025-10-01', '2025-10-17')}"
+```
+
+#### `date.isBefore(date1, date2)` / `date.isAfter(date1, date2)`
+Compare dates:
+
+```yaml
+condition: "${date.isBefore(params.date, '2025-12-31')}"
+```
+
+### String Functions
+
+#### `string.uuid()`
+Generate a random UUID:
+
+```yaml
+env:
+  RUN_ID: "${string.uuid()}"
+  TRACE_ID: "${string.uuid()}"
+```
+
+#### `string.slugify(text)`
+Convert text to URL-safe slug:
+
+```yaml
+env:
+  WORKFLOW_SLUG: "${string.slugify('My Workflow Name')}"
+  # Result: "my-workflow-name"
+```
+
+#### `string.join(separator, parts...)`
+Join multiple strings:
+
+```yaml
+env:
+  PATH: "${string.join('/', params.bucket, params.path, params.file)}"
+```
+
+#### `string.padLeft(text, length, char)` / `string.padRight(text, length, char)`
+Pad strings to a specific length:
+
+```yaml
+env:
+  ORDER_ID: "${string.padLeft(params.id, 8, '0')}"
+  # "42" becomes "00000042"
+```
+
+#### `string.toSnakeCase(text)`
+Convert to snake_case:
+
+```yaml
+env:
+  VAR_NAME: "${string.toSnakeCase('myVariableName')}"
+  # Result: "my_variable_name"
+```
+
+#### `string.toCamelCase(text)`
+Convert to camelCase:
+
+```yaml
+env:
+  VAR_NAME: "${string.toCamelCase('my_variable_name')}"
+  # Result: "myVariableName"
+```
+
+### Math Functions
+
+Access standard Java Math functions:
+
+```yaml
+env:
+  ROUNDED: "${Math.round(3.7)}"           # 4
+  FLOOR: "${Math.floor(3.7)}"             # 3.0
+  CEIL: "${Math.ceil(3.2)}"               # 4.0
+  MAX: "${Math.max(params.a, params.b)}"  # larger value
+  MIN: "${Math.min(params.a, params.b)}"  # smaller value
+  ABS: "${Math.abs(params.value)}"        # absolute value
+```
+
+## Common Patterns
+
+### Dynamic File Paths
+
+```yaml
+args:
+  - --input
+  - "gs://${params.bucket}/raw/${params.date}/*.parquet"
+  - --output
+  - "gs://${params.bucket}/processed/${params.date}/"
+```
+
+### Conditional Arguments
+
+```yaml
+args:
+  - dbt
+  - run
+  - "${params.full_refresh ? '--full-refresh' : ''}"
+  - "${params.threads ? '--threads' : ''}"
+  - "${params.threads ?: ''}"
+```
+
+### Environment-Specific Configuration
+
+```yaml
+env:
+  DATABASE_URL: "${params.env == 'prod' ? env.PROD_DB_URL : env.DEV_DB_URL}"
+  LOG_LEVEL: "${params.env == 'prod' ? 'INFO' : 'DEBUG'}"
+  WORKERS: "${params.env == 'prod' ? 16 : 4}"
+```
+
+### Date-Based Partitioning
+
+```yaml
+args:
+  - --partition
+  - "${date.format(params.date, 'yyyy/MM/dd')}"
+  - --date-range
+  - "${date.sub(params.date, 7, 'days')}"
+  - to
+  - "${params.date}"
+```
+
+### Parametric Keys for Global Tasks
+
+```yaml
+key: "load_${params.dataset}_${params.date}_${params.region}"
+```
+
+### Default Values with Fallbacks
+
+```yaml
+params:
+  batch_date:
+    default: "${params.override_date ?: date.today()}"
+  
+  timeout:
+    default: "${params.custom_timeout ?: env.DEFAULT_TIMEOUT ?: 3600}"
+```
+
+### Complex Calculations
+
+```yaml
+env:
+  # Calculate memory allocation based on scale
+  MEMORY_GB: "${Math.min(Math.max(params.scale * 2, 4), 64)}"
+  
+  # Dynamic parallelism
+  PARALLELISM: "${params.dataset == 'large' ? 32 : params.dataset == 'medium' ? 16 : 8}"
+```
+
+## Best Practices
+
+### 1. Keep Expressions Simple
+
+**Good:**
+```yaml
+env:
+  DATE: "${params.date}"
+  REGION: "${params.region}"
+```
+
+**Avoid:**
+```yaml
+env:
+  COMPLEX: "${params.a + params.b * params.c > 100 ? 'high' : params.d ? 'medium' : 'low'}"
+```
+
+For complex logic, break it into multiple parameters or use task code.
+
+### 2. Use Meaningful Parameter Names
+
+**Good:**
+```yaml
+params:
+  batch_date:
+    default: "${date.today()}"
+  processing_region:
+    default: "us"
+```
+
+**Avoid:**
+```yaml
+params:
+  d:
+    default: "${date.today()}"
+  r:
+    default: "us"
+```
+
+### 3. Validate Required Parameters
+
+Always mark required parameters explicitly:
+
+```yaml
+params:
+  batch_date:
+    type: string
+    required: true
+    description: "Processing date in YYYY-MM-DD format"
+```
+
+### 4. Document Complex Expressions
+
+Add descriptions to parameters with complex defaults:
+
+```yaml
+params:
+  lookback_date:
+    type: string
+    default: "${date.sub(date.today(), 7, 'days')}"
+    description: "Date 7 days ago for lookback window"
+```
+
+### 5. Use Elvis for Fallbacks
+
+Provide sensible defaults:
+
+```yaml
+params:
+  timeout:
+    default: "${params.custom_timeout ?: env.DEFAULT_TIMEOUT ?: 3600}"
+    description: "Task timeout in seconds (default: 1 hour)"
+```
+
+### 6. Test Expressions in Dev Mode
+
+Use trial run mode to verify expressions evaluate correctly:
+
+```bash
+# Enable trial run in application-dev.yaml
+orchestrator:
+  dev:
+    trial-run: true
+```
+
+## Troubleshooting
+
+### Expression Returns Null
+
+**Problem:** Expression evaluates to `null`
+
+**Solutions:**
+- Check variable names are spelled correctly
+- Verify the variable exists in context (`params`, `env`, `task`)
+- Use elvis operator for default: `${params.value ?: 'default'}`
+- Use null-safe navigation: `${params.config?.api?.key}`
+
+### Expression Syntax Error
+
+**Problem:** `Failed to evaluate expression` error
+
+**Solutions:**
+- Ensure expression is wrapped in `${ }`
+- Check for balanced braces and quotes
+- Verify function names are correct
+- Test with simpler expression first
+
+### Type Mismatch
+
+**Problem:** Operation fails due to type mismatch
+
+**Solutions:**
+- Use explicit type conversion if needed
+- Check parameter types in definition
+- Remember that all params are initially strings from YAML
+
+### String Interpolation Issues
+
+**Problem:** URLs with `://` cause parsing errors
+
+**Solution:** This is handled automatically - the evaluator correctly handles strings like:
+```yaml
+"gs://bucket-${params.region}/data/${params.date}/file.csv"
+```
+
+## Performance Considerations
+
+- **Expression Caching**: Up to 512 compiled expressions are cached automatically
+- **Repeated Evaluations**: Same expressions in loops benefit from caching
+- **Complex Expressions**: Break very complex expressions into multiple simpler ones
+- **String Concatenation**: Multiple small concatenations are optimized by JEXL
+
+## Security Notes
+
+- Expressions run with unrestricted permissions for flexibility
+- Only use trusted YAML configurations
+- Avoid exposing sensitive data in expression results that might be logged
+- Use environment variables for secrets, not parameters
