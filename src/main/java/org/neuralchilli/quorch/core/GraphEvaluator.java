@@ -14,7 +14,6 @@ import org.neuralchilli.quorch.domain.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.Serializable;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -55,9 +54,6 @@ public class GraphEvaluator {
     // Performance optimization: indexed task execution lookup
     private IMap<TaskExecutionLookupKey, UUID> taskExecutionIndex;
 
-    // Performance optimization: cached DAGs
-    private IMap<String, CachedDAG> dagCache;
-
     // Work queue
     private IQueue<WorkMessage> workQueue;
 
@@ -68,7 +64,6 @@ public class GraphEvaluator {
         taskExecutions = hazelcast.getMap("task-executions");
         globalTasks = hazelcast.getMap("global-tasks");
         taskExecutionIndex = hazelcast.getMap("task-execution-index");
-        dagCache = hazelcast.getMap("dag-cache");
         workQueue = hazelcast.getQueue("work-queue");
 
         log.info("GraphEvaluator initialized");
@@ -96,7 +91,8 @@ public class GraphEvaluator {
         // Create task executions for all tasks in graph
         createTaskExecutions(execution, graph);
 
-        // Trigger initial evaluation
+        // Trigger initial evaluation - use send for synchronous processing in tests
+        log.info("Triggering evaluation for graph: {}", execution.id());
         eventBus.send("graph.evaluate", execution.id());
 
         return execution.id();
@@ -256,7 +252,7 @@ public class GraphEvaluator {
      */
     @ConsumeEvent("graph.evaluate")
     public void evaluate(UUID graphExecutionId) {
-        log.debug("Evaluating graph execution: {}", graphExecutionId);
+        log.info("=== EVALUATE called for graph: {}", graphExecutionId);
 
         GraphExecution graphExec = graphExecutions.get(graphExecutionId);
         if (graphExec == null) {
@@ -279,16 +275,18 @@ public class GraphEvaluator {
         }
 
         try {
-            // Get or build DAG (cached for performance)
-            DirectedAcyclicGraph<TaskNode, DefaultEdge> dag = getOrBuildDAG(graph);
+            // Build DAG (skip caching for now to avoid serialization issues)
+            DirectedAcyclicGraph<TaskNode, DefaultEdge> dag = jGraphTService.buildDAG(graph);
+            log.debug("Built DAG with {} tasks for graph: {}", dag.vertexSet().size(), graphExecutionId);
 
             // Get current task states (optimized with index)
             Map<TaskNode, TaskStatus> taskStates = getCurrentTaskStatesOptimized(graphExecutionId, dag);
+            log.debug("Current task states: {}", taskStates);
 
             // Find ready tasks
             Set<TaskNode> readyTasks = jGraphTService.findReadyTasks(dag, taskStates);
 
-            log.debug("Found {} ready tasks for graph: {}", readyTasks.size(), graphExecutionId);
+            log.info("Found {} ready tasks for graph: {}", readyTasks.size(), graphExecutionId);
 
             // Schedule each ready task
             for (TaskNode taskNode : readyTasks) {
@@ -302,27 +300,6 @@ public class GraphEvaluator {
             log.error("Error evaluating graph: {}", graphExecutionId, e);
             markGraphFailed(graphExec, "Evaluation error: " + e.getMessage());
         }
-    }
-
-    /**
-     * Get or build cached DAG for a graph.
-     * DAGs are immutable for a given graph definition, so we can cache them.
-     */
-    private DirectedAcyclicGraph<TaskNode, DefaultEdge> getOrBuildDAG(Graph graph) {
-        CachedDAG cached = dagCache.get(graph.name());
-
-        if (cached != null) {
-            log.debug("Using cached DAG for graph: {}", graph.name());
-            return cached.dag();
-        }
-
-        log.debug("Building new DAG for graph: {}", graph.name());
-        DirectedAcyclicGraph<TaskNode, DefaultEdge> dag = jGraphTService.buildDAG(graph);
-
-        // Cache it
-        dagCache.put(graph.name(), new CachedDAG(dag));
-
-        return dag;
     }
 
     /**
@@ -350,40 +327,12 @@ public class GraphEvaluator {
             }
 
             // Fallback to PENDING if not found
+            log.warn("Task execution not found in index for: {} in graph: {}",
+                    node.taskName(), graphExecutionId);
             states.put(node, TaskStatus.PENDING);
         }
 
         return states;
-    }
-
-    /**
-     * Get current status of all tasks in the graph.
-     */
-    private Map<TaskNode, TaskStatus> getCurrentTaskStates(
-            UUID graphExecutionId,
-            DirectedAcyclicGraph<TaskNode, DefaultEdge> dag
-    ) {
-        Map<TaskNode, TaskStatus> states = new HashMap<>();
-
-        for (TaskNode node : dag.vertexSet()) {
-            TaskStatus status = getTaskStatus(graphExecutionId, node.taskName());
-            states.put(node, status);
-        }
-
-        return states;
-    }
-
-    /**
-     * Get status of a specific task in a graph execution.
-     */
-    private TaskStatus getTaskStatus(UUID graphExecutionId, String taskName) {
-        // Find task execution for this graph and task
-        return taskExecutions.values().stream()
-                .filter(te -> te.graphExecutionId().equals(graphExecutionId))
-                .filter(te -> te.taskName().equals(taskName))
-                .map(TaskExecution::status)
-                .findFirst()
-                .orElse(TaskStatus.PENDING);
     }
 
     /**
@@ -427,7 +376,7 @@ public class GraphEvaluator {
      * Schedule a global task (with deduplication).
      */
     private void scheduleGlobalTask(String taskName, GraphExecution graphExec, Graph graph) {
-        log.debug("Scheduling global task: {} for graph: {}", taskName, graphExec.id());
+        log.info("Scheduling global task: {} for graph: {}", taskName, graphExec.id());
 
         // Find task execution (optimized lookup)
         TaskExecution taskExec = findTaskExecutionOptimized(graphExec.id(), taskName);
@@ -437,6 +386,7 @@ public class GraphEvaluator {
         }
 
         TaskExecutionKey key = taskExec.globalKey();
+        log.debug("Global task key: {}", key);
 
         // Lock the global task key to ensure atomic operations
         globalTasks.lock(key);
@@ -471,6 +421,7 @@ public class GraphEvaluator {
                         graphExec.id()
                 );
                 globalTasks.put(key, globalExec);
+                log.info("Created global task execution: {}", globalExec.id());
 
                 // Schedule it
                 scheduleTask(taskExec, taskDef, graphExec);
@@ -528,9 +479,9 @@ public class GraphEvaluator {
         WorkMessage work = createWorkMessage(taskDef, graphExec, taskExec);
 
         // Publish to work queue
-        workQueue.offer(work);
-
-        log.debug("Task queued: {} - queue size: {}", taskExec.taskName(), workQueue.size());
+        boolean offered = workQueue.offer(work);
+        log.info("Task {} queued to work queue: {} - queue size: {}",
+                taskExec.taskName(), offered, workQueue.size());
     }
 
     /**
@@ -672,14 +623,6 @@ public class GraphEvaluator {
         return null;
     }
 
-    private TaskExecution findTaskExecution(UUID graphExecutionId, String taskName) {
-        return taskExecutions.values().stream()
-                .filter(te -> te.graphExecutionId().equals(graphExecutionId))
-                .filter(te -> te.taskName().equals(taskName))
-                .findFirst()
-                .orElse(null);
-    }
-
     private Task getTaskDefinition(TaskExecution taskExec) {
         GraphExecution graphExec = graphExecutions.get(taskExec.graphExecutionId());
         Graph graph = graphDefinitions.get(graphExec.graphName());
@@ -754,19 +697,4 @@ public class GraphEvaluator {
 
         return result;
     }
-
-    /**
-     * Lookup key for task execution index.
-     */
-    public record TaskExecutionLookupKey(
-            UUID graphExecutionId,
-            String taskName
-    ) implements Serializable {}
-
-    /**
-     * Cached DAG wrapper for serialization.
-     */
-    public record CachedDAG(
-            DirectedAcyclicGraph<TaskNode, DefaultEdge> dag
-    ) implements Serializable {}
 }
