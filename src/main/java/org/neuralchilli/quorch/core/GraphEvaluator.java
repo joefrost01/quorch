@@ -8,6 +8,7 @@ import io.vertx.mutiny.core.eventbus.EventBus;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jgrapht.graph.DefaultEdge;
 import org.jgrapht.graph.DirectedAcyclicGraph;
 import org.neuralchilli.quorch.domain.*;
@@ -23,7 +24,7 @@ import java.util.stream.Collectors;
  *
  * 1. DAG Caching - Build DAG once per graph definition, reuse across evaluations (10-50x faster)
  * 2. Optimistic Locking - Replace distributed locks with compare-and-swap for global tasks (10x less contention)
- * 3. Async Event Bus - Use publish() for non-blocking evaluation triggers
+ * 3. Async Event Bus - Use publish() for non-blocking evaluation triggers (configurable for tests)
  * 4. Indexed Lookups - O(1) task execution retrieval
  *
  * Performance impact: ~500-1000 tasks/sec vs ~50-100 tasks/sec before optimization
@@ -45,6 +46,9 @@ public class GraphEvaluator {
 
     @Inject
     EventBus eventBus;
+
+    @ConfigProperty(name = "orchestrator.test-mode", defaultValue = "false")
+    boolean testMode;
 
     // State maps
     private IMap<String, Graph> graphDefinitions;
@@ -70,7 +74,7 @@ public class GraphEvaluator {
         taskExecutionIndex = hazelcast.getMap("task-execution-index");
         workQueue = hazelcast.getQueue("work-queue");
 
-        log.info("GraphEvaluator initialized with DAG caching and optimistic locking");
+        log.info("GraphEvaluator initialized with DAG caching and optimistic locking (test-mode: {})", testMode);
     }
 
     /**
@@ -95,11 +99,30 @@ public class GraphEvaluator {
         // Create task executions for all tasks in graph
         createTaskExecutions(execution, graph);
 
-        // Trigger initial evaluation - ASYNC for non-blocking
+        // Trigger initial evaluation - synchronous in test mode, async in production
         log.info("Triggering evaluation for graph: {}", execution.id());
-        eventBus.publish("graph.evaluate", execution.id());
+        triggerEvaluation(execution.id());
 
         return execution.id();
+    }
+
+    /**
+     * Trigger graph evaluation - synchronous in test mode, async in production.
+     * This solves the test timing issues while keeping production async.
+     */
+    private void triggerEvaluation(UUID graphExecutionId) {
+        System.out.println("TRIGGER EVALUATION called for: " + graphExecutionId);
+        System.out.println("Test mode: " + testMode);
+
+        if (testMode) {
+            System.out.println("Calling evaluate directly...");
+            log.debug("Test mode: direct synchronous evaluation for graph: {}", graphExecutionId);
+            evaluate(graphExecutionId);
+            System.out.println("Evaluate call completed");
+        } else {
+            log.debug("Production mode: async evaluation via event bus for graph: {}", graphExecutionId);
+            eventBus.publish("graph.evaluate", graphExecutionId);
+        }
     }
 
     /**
@@ -175,6 +198,13 @@ public class GraphEvaluator {
      */
     @ConsumeEvent("task.completed")
     public void onTaskCompleted(TaskCompletionEvent event) {
+        handleTaskCompletion(event);
+    }
+
+    /**
+     * Internal task completion handler (separated for direct calling in tests)
+     */
+    private void handleTaskCompletion(TaskCompletionEvent event) {
         log.info("Task completed: {}", event.taskExecutionId());
 
         TaskExecution taskExec = taskExecutions.get(event.taskExecutionId());
@@ -192,7 +222,7 @@ public class GraphEvaluator {
             updateGlobalTaskState(taskExec.globalKey(), updated);
         }
 
-        // Trigger re-evaluation of graph - ASYNC
+        // Trigger re-evaluation of graph
         notifyGraphsForEvaluation(taskExec);
     }
 
@@ -202,6 +232,13 @@ public class GraphEvaluator {
      */
     @ConsumeEvent("task.failed")
     public void onTaskFailed(TaskFailureEvent event) {
+        handleTaskFailure(event);
+    }
+
+    /**
+     * Internal task failure handler (separated for direct calling in tests)
+     */
+    private void handleTaskFailure(TaskFailureEvent event) {
         log.warn("Task failed: {} - {}", event.taskExecutionId(), event.error());
 
         TaskExecution taskExec = taskExecutions.get(event.taskExecutionId());
@@ -245,7 +282,7 @@ public class GraphEvaluator {
                 updateGlobalTaskState(taskExec.globalKey(), failed);
             }
 
-            // Trigger re-evaluation (will mark downstream as skipped) - ASYNC
+            // Trigger re-evaluation (will mark downstream as skipped)
             notifyGraphsForEvaluation(taskExec);
         }
     }
@@ -255,9 +292,25 @@ public class GraphEvaluator {
      * Finds ready tasks and schedules them for execution.
      *
      * PERFORMANCE OPTIMIZATION: Uses cached DAG instead of rebuilding
+     *
+     * This method is public so it can be called directly in tests.
+     * In production, it's triggered via event bus.
      */
     @ConsumeEvent("graph.evaluate")
     public void evaluate(UUID graphExecutionId) {
+        System.out.println("========================================");
+        System.out.println("EVALUATE CALLED: " + graphExecutionId);
+        System.out.println("Test mode: " + testMode);
+        System.out.println("========================================");
+
+        log.info("=== EVALUATE called for graph: {}", graphExecutionId);
+        evaluateInternal(graphExecutionId);
+    }
+
+    /**
+     * Internal evaluation logic, separated so it can be called directly in test mode.
+     */
+    private void evaluateInternal(UUID graphExecutionId) {
         log.info("=== EVALUATE called for graph: {}", graphExecutionId);
 
         GraphExecution graphExec = graphExecutions.get(graphExecutionId);
@@ -316,6 +369,7 @@ public class GraphEvaluator {
             markGraphFailed(graphExec, "Evaluation error: " + e.getMessage());
         }
     }
+
 
     /**
      * Get current status of all tasks in the graph (optimized version).
@@ -482,8 +536,8 @@ public class GraphEvaluator {
                 TaskExecution completed = taskExec.complete(globalExec.result());
                 taskExecutions.put(completed.id(), completed);
 
-                // Re-evaluate graph to schedule downstream tasks - ASYNC
-                eventBus.publish("graph.evaluate", graphExec.id());
+                // Re-evaluate graph to schedule downstream tasks
+                triggerEvaluation(graphExec.id());
                 return;
 
             } else if (globalExec.status() == TaskStatus.FAILED) {
@@ -493,8 +547,8 @@ public class GraphEvaluator {
                 TaskExecution failed = taskExec.fail(globalExec.error());
                 taskExecutions.put(failed.id(), failed);
 
-                // Re-evaluate graph to mark downstream as skipped - ASYNC
-                eventBus.publish("graph.evaluate", graphExec.id());
+                // Re-evaluate graph to mark downstream as skipped
+                triggerEvaluation(graphExec.id());
                 return;
             }
         }
@@ -648,16 +702,16 @@ public class GraphEvaluator {
 
     private void notifyGraphsForEvaluation(TaskExecution taskExec) {
         if (taskExec.isGlobal()) {
-            // Notify all linked graphs - ASYNC
+            // Notify all linked graphs
             GlobalTaskExecution globalExec = globalTasks.get(taskExec.globalKey());
             if (globalExec != null) {
                 for (UUID graphId : globalExec.linkedGraphExecutions()) {
-                    eventBus.publish("graph.evaluate", graphId);
+                    triggerEvaluation(graphId);
                 }
             }
         } else {
-            // Notify this graph only - ASYNC
-            eventBus.publish("graph.evaluate", taskExec.graphExecutionId());
+            // Notify this graph only
+            triggerEvaluation(taskExec.graphExecutionId());
         }
     }
 
@@ -704,7 +758,7 @@ public class GraphEvaluator {
     private void markTaskFailed(TaskExecution taskExec, String error) {
         TaskExecution failed = taskExec.fail(error);
         taskExecutions.put(failed.id(), failed);
-        eventBus.publish("graph.evaluate", taskExec.graphExecutionId());
+        triggerEvaluation(taskExec.graphExecutionId());
     }
 
     private void markGraphFailed(GraphExecution graphExec, String error) {
