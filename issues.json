@@ -44,7 +44,7 @@
     "title": "Core: Graph Evaluator - Execution Engine",
     "body": "## Overview\nImplement the core graph evaluation engine that schedules tasks based on dependencies.\n\n## Tasks\n- [ ] Create `GraphEvaluator` service\n- [ ] Implement `evaluate()` method:\n  - Build DAG\n  - Get current execution state\n  - Find ready tasks\n  - Schedule tasks (regular or global)\n  - Update graph status\n- [ ] Handle task completion events\n- [ ] Handle task failure events\n- [ ] Implement graph status updates (RUNNING, COMPLETED, FAILED, STALLED)\n- [ ] Support re-evaluation on task state changes\n- [ ] Publish events to Vert.x EventBus\n\n## Acceptance Criteria\n- Graph executes tasks in correct dependency order\n- Parallel tasks execute concurrently\n- Failed tasks mark graph as FAILED\n- Graph completes when all tasks complete\n- Events published for all state changes\n\n## Labels\ncore, priority:critical, phase:core",
     "labels": ["core", "priority:critical", "phase:core"],
-    "status": "in progress"
+    "status": "complete"
   },
   {
     "title": "Core: Global Task Deduplication",
