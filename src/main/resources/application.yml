@@ -1,2 +1,13 @@
+orchestrator:
+  config:
+    graphs: ./graphs
+    tasks: ./tasks
+    watch: true
+
+# Hazelcast configuration
+hazelcast:
+  client:
+    cluster-name: orchestrator-dev
+
 greeting:
   message: "hello"
