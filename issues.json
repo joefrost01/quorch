@@ -14,7 +14,8 @@
   {
     "title": "Core: JEXL Expression Evaluator",
     "body": "## Overview\nImplement JEXL expression evaluation with built-in functions and context.\n\n## Tasks\n- [ ] Setup Apache Commons JEXL 3\n- [ ] Create `ExpressionEvaluator` service\n- [ ] Implement `Context` record with params, env, tasks\n- [ ] Add built-in date functions: `date.today()`, `date.now()`, `date.add()`, `date.sub()`, `date.format()`\n- [ ] Add built-in string functions: `string.uuid()`, `string.slugify()`\n- [ ] Add string methods: `toUpperCase()`, `toLowerCase()`, `replace()`, `trim()`\n- [ ] Expose Math functions\n- [ ] Add support for task result references: `${task.taskname.result.property}`\n- [ ] Implement null-safe access and elvis operator\n\n## Acceptance Criteria\n- All examples from design doc evaluate correctly\n- Expression errors produce clear messages with context\n- Unit tests cover all built-in functions\n- Performance test: 10,000 evaluations < 100ms\n\n## Labels\ncore, priority:high, phase:foundation",
-    "labels": ["core", "priority:high", "phase:foundation"]
+    "labels": ["core", "priority:high", "phase:foundation"],
+    "status": "in progress"
   },
   {
     "title": "Core: Graph and Task Loader with Hot Reload",
@@ -35,7 +36,7 @@
     "title": "Core: Domain Model - Executions and State",
     "body": "## Overview\nDefine domain models for execution state and lifecycle.\n\n## Tasks\n- [ ] Create `GraphExecution` record:\n  - id, graphName, params, status, triggeredBy, startedAt, completedAt, error\n- [ ] Create `TaskExecution` record:\n  - id, graphExecutionId, taskName, status, workerId, threadName, startedAt, completedAt, duration, result, error, attempt\n- [ ] Create `GlobalTaskExecution` record:\n  - id, taskName, resolvedKey, params, status, linkedGraphExecutions, startedAt, completedAt, result\n- [ ] Create `Worker` record:\n  - id, threads, activeThreads, lastHeartbeat, status\n- [ ] Define enums: `GraphStatus`, `TaskStatus`, `WorkerStatus`\n- [ ] Implement state transition validation\n\n## Acceptance Criteria\n- All records properly serializable\n- State transitions validated\n- Status enums cover all states from design\n\n## Labels\ncore, priority:high, phase:foundation",
     "labels": ["core", "priority:high", "phase:foundation"],
-    "status": "in progress"
+    "status": "complete"
   },
   {
     "title": "Core: Graph Evaluator - Execution Engine",
