@@ -1,26 +1,43 @@
 package org.neuralchilli.quorch.core;
 
+import java.io.Serial;
+import java.io.Serializable;
+import java.util.HashMap;
 import java.util.Map;
 
 /**
  * Context for JEXL expression evaluation.
  * Provides access to parameters, environment variables, and task results.
  */
-public record ExpressionContext(
-        Map<String, Object> params,
-        Map<String, String> env,
-        Map<String, Map<String, Object>> taskResults
-) {
-    public ExpressionContext {
-        if (params == null) {
-            params = Map.of();
-        }
-        if (env == null) {
-            env = Map.of();
-        }
-        if (taskResults == null) {
-            taskResults = Map.of();
-        }
+public final class ExpressionContext implements Serializable {
+
+    @Serial
+    private static final long serialVersionUID = 1L;
+
+    private final Map<String, Object> params;
+    private final Map<String, String> env;
+    private final Map<String, Map<String, Object>> taskResults;
+
+    public ExpressionContext(
+            Map<String, Object> params,
+            Map<String, String> env,
+            Map<String, Map<String, Object>> taskResults
+    ) {
+        this.params = params != null ? new HashMap<>(params) : Map.of();
+        this.env = env != null ? new HashMap<>(env) : Map.of();
+        this.taskResults = taskResults != null ? new HashMap<>(taskResults) : Map.of();
+    }
+
+    public Map<String, Object> params() {
+        return params;
+    }
+
+    public Map<String, String> env() {
+        return env;
+    }
+
+    public Map<String, Map<String, Object>> taskResults() {
+        return taskResults;
     }
 
     /**
@@ -59,5 +76,12 @@ public record ExpressionContext(
      */
     public Map<String, Object> getTaskResult(String taskName) {
         return taskResults.getOrDefault(taskName, Map.of());
+    }
+
+    @Override
+    public String toString() {
+        return "ExpressionContext[params=" + params.size() +
+                ", env=" + env.size() +
+                ", taskResults=" + taskResults.size() + "]";
     }
 }
