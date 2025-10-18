@@ -2,7 +2,6 @@ package org.neuralchilli.quorch.config;
 
 import com.hazelcast.config.Config;
 import com.hazelcast.config.SerializationConfig;
-import com.hazelcast.config.SerializerConfig;
 import com.hazelcast.core.Hazelcast;
 import com.hazelcast.core.HazelcastInstance;
 import io.quarkus.runtime.Startup;
@@ -10,14 +9,12 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Produces;
 import jakarta.inject.Singleton;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.neuralchilli.quorch.domain.Parameter;
-import org.neuralchilli.quorch.domain.TaskReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Configures and produces the Hazelcast instance with custom serializers.
- * Ensures consistent serialization across dev and prod environments.
+ * Configures and produces the Hazelcast instance.
+ * Uses Java serialization for domain objects.
  */
 @ApplicationScoped
 public class HazelcastConfig {
@@ -40,28 +37,17 @@ public class HazelcastConfig {
         config.getNetworkConfig().getJoin().getMulticastConfig().setEnabled(false);
         config.getNetworkConfig().getJoin().getTcpIpConfig().setEnabled(false);
 
-        // Configure serialization
+        // Configure serialization to prefer Java serialization
         SerializationConfig serializationConfig = config.getSerializationConfig();
 
-        // Disable all auto-serialization mechanisms
+        // Disable compression and shared objects
         serializationConfig.setEnableCompression(false);
         serializationConfig.setEnableSharedObject(false);
 
-        // Set global serializers to use StreamSerializer for everything not explicitly configured
+        // Allow class definition errors (more lenient)
         serializationConfig.setCheckClassDefErrors(false);
 
-        // Register custom serializers with HIGH priority (lower number = higher priority)
-        SerializerConfig paramConfig = new SerializerConfig();
-        paramConfig.setTypeClass(Parameter.class);
-        paramConfig.setClass(HazelcastSerializers.ParameterSerializer.class);
-        serializationConfig.addSerializerConfig(paramConfig);
-
-        SerializerConfig taskRefConfig = new SerializerConfig();
-        taskRefConfig.setTypeClass(TaskReference.class);
-        taskRefConfig.setClass(HazelcastSerializers.TaskReferenceSerializer.class);
-        serializationConfig.addSerializerConfig(taskRefConfig);
-
-        log.info("Registered custom serializers for Parameter and TaskReference");
+        log.info("Hazelcast configured to use Java serialization for domain objects");
 
         HazelcastInstance instance = Hazelcast.newHazelcastInstance(config);
 

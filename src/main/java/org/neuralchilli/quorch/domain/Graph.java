@@ -1,21 +1,35 @@
 package org.neuralchilli.quorch.domain;
 
+import java.io.Serial;
+import java.io.Serializable;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * Represents a workflow graph definition.
  * A graph is a DAG (directed acyclic graph) of tasks with dependencies.
  */
-public record Graph(
-        String name,
-        String description,
-        Map<String, Parameter> params,
-        Map<String, String> env,
-        String schedule,  // Cron expression, optional
-        List<TaskReference> tasks
-) {
-    public Graph {
+public final class Graph implements Serializable {
+
+    @Serial
+    private static final long serialVersionUID = 1L;
+
+    private final String name;
+    private final String description;
+    private final Map<String, Parameter> params;
+    private final Map<String, String> env;
+    private final String schedule;
+    private final List<TaskReference> tasks;
+
+    public Graph(
+            String name,
+            String description,
+            Map<String, Parameter> params,
+            Map<String, String> env,
+            String schedule,
+            List<TaskReference> tasks
+    ) {
         // Validation
         if (name == null || name.isBlank()) {
             throw new IllegalArgumentException("Graph name cannot be null or empty");
@@ -33,14 +47,22 @@ public record Graph(
             );
         }
 
-        // Defaults
-        if (params == null) {
-            params = Map.of();
-        }
-        if (env == null) {
-            env = Map.of();
-        }
+        // Assign with defaults
+        this.name = name;
+        this.description = description;
+        this.params = params != null ? Map.copyOf(params) : Map.of();
+        this.env = env != null ? Map.copyOf(env) : Map.of();
+        this.schedule = schedule;
+        this.tasks = List.copyOf(tasks);
     }
+
+    // Getters
+    public String name() { return name; }
+    public String description() { return description; }
+    public Map<String, Parameter> params() { return params; }
+    public Map<String, String> env() { return env; }
+    public String schedule() { return schedule; }
+    public List<TaskReference> tasks() { return tasks; }
 
     /**
      * Get all task names in this graph (for dependency validation)
@@ -56,6 +78,35 @@ public record Graph(
      */
     public boolean isScheduled() {
         return schedule != null && !schedule.isBlank();
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+        if (obj == this) return true;
+        if (obj == null || obj.getClass() != this.getClass()) return false;
+        Graph that = (Graph) obj;
+        return Objects.equals(this.name, that.name) &&
+                Objects.equals(this.description, that.description) &&
+                Objects.equals(this.params, that.params) &&
+                Objects.equals(this.env, that.env) &&
+                Objects.equals(this.schedule, that.schedule) &&
+                Objects.equals(this.tasks, that.tasks);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(name, description, params, env, schedule, tasks);
+    }
+
+    @Override
+    public String toString() {
+        return "Graph[" +
+                "name=" + name + ", " +
+                "description=" + description + ", " +
+                "params=" + params + ", " +
+                "env=" + env + ", " +
+                "schedule=" + schedule + ", " +
+                "tasks=" + tasks + ']';
     }
 
     /**

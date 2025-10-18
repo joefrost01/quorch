@@ -1,25 +1,43 @@
 package org.neuralchilli.quorch.domain;
 
+import java.io.Serial;
+import java.io.Serializable;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * Represents a task definition.
  * Tasks can be inline (defined within a graph) or global (shared across graphs).
  */
-public record Task(
-        String name,
-        boolean global,
-        String key,  // JEXL expression for global task deduplication
-        Map<String, Parameter> params,
-        String command,
-        List<String> args,
-        Map<String, String> env,
-        int timeout,  // seconds
-        int retry,
-        List<String> dependsOn
-) {
-    public Task {
+public final class Task implements Serializable {
+
+    @Serial
+    private static final long serialVersionUID = 1L;
+
+    private final String name;
+    private final boolean global;
+    private final String key;
+    private final Map<String, Parameter> params;
+    private final String command;
+    private final List<String> args;
+    private final Map<String, String> env;
+    private final int timeout;
+    private final int retry;
+    private final List<String> dependsOn;
+
+    public Task(
+            String name,
+            boolean global,
+            String key,
+            Map<String, Parameter> params,
+            String command,
+            List<String> args,
+            Map<String, String> env,
+            int timeout,
+            int retry,
+            List<String> dependsOn
+    ) {
         // Validation
         if (name == null || name.isBlank()) {
             throw new IllegalArgumentException("Task name cannot be null or empty");
@@ -47,25 +65,66 @@ public record Task(
             );
         }
 
-        // Defaults
-        if (args == null) {
-            args = List.of();
-        }
-        if (env == null) {
-            env = Map.of();
-        }
-        if (dependsOn == null) {
-            dependsOn = List.of();
-        }
-        if (params == null) {
-            params = Map.of();
-        }
-        if (timeout <= 0) {
-            timeout = 3600; // 1 hour default
-        }
-        if (retry < 0) {
-            retry = 3; // default 3 retries
-        }
+        // Assign with defaults
+        this.name = name;
+        this.global = global;
+        this.key = key;
+        this.params = params != null ? Map.copyOf(params) : Map.of();
+        this.command = command;
+        this.args = args != null ? List.copyOf(args) : List.of();
+        this.env = env != null ? Map.copyOf(env) : Map.of();
+        this.timeout = timeout > 0 ? timeout : 3600;
+        this.retry = retry >= 0 ? retry : 3;
+        this.dependsOn = dependsOn != null ? List.copyOf(dependsOn) : List.of();
+    }
+
+    // Getters
+    public String name() { return name; }
+    public boolean global() { return global; }
+    public String key() { return key; }
+    public Map<String, Parameter> params() { return params; }
+    public String command() { return command; }
+    public List<String> args() { return args; }
+    public Map<String, String> env() { return env; }
+    public int timeout() { return timeout; }
+    public int retry() { return retry; }
+    public List<String> dependsOn() { return dependsOn; }
+
+    @Override
+    public boolean equals(Object obj) {
+        if (obj == this) return true;
+        if (obj == null || obj.getClass() != this.getClass()) return false;
+        Task that = (Task) obj;
+        return Objects.equals(this.name, that.name) &&
+                this.global == that.global &&
+                Objects.equals(this.key, that.key) &&
+                Objects.equals(this.params, that.params) &&
+                Objects.equals(this.command, that.command) &&
+                Objects.equals(this.args, that.args) &&
+                Objects.equals(this.env, that.env) &&
+                this.timeout == that.timeout &&
+                this.retry == that.retry &&
+                Objects.equals(this.dependsOn, that.dependsOn);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(name, global, key, params, command, args, env, timeout, retry, dependsOn);
+    }
+
+    @Override
+    public String toString() {
+        return "Task[" +
+                "name=" + name + ", " +
+                "global=" + global + ", " +
+                "key=" + key + ", " +
+                "params=" + params + ", " +
+                "command=" + command + ", " +
+                "args=" + args + ", " +
+                "env=" + env + ", " +
+                "timeout=" + timeout + ", " +
+                "retry=" + retry + ", " +
+                "dependsOn=" + dependsOn + ']';
     }
 
     /**
