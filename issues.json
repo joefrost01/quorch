@@ -31,7 +31,8 @@
   {
     "title": "Core: JGraphT DAG Builder and Evaluator",
     "body": "## Overview\nImplement DAG construction and evaluation using JGraphT.\n\n## Tasks\n- [ ] Add JGraphT dependency\n- [ ] Create `JGraphTService`\n- [ ] Implement `buildDAG()` to create DirectedAcyclicGraph from Graph definition\n- [ ] Add cycle detection with clear error messages\n- [ ] Implement `findReadyTasks()` to identify tasks with satisfied dependencies\n- [ ] Implement topological sort for execution order\n- [ ] Add support for task references in depends_on\n- [ ] Handle both inline tasks and global task references\n\n## Acceptance Criteria\n- DAG correctly represents graph structure\n- Cycle detection prevents invalid graphs\n- `findReadyTasks()` correctly identifies executable tasks\n- Unit tests cover various graph topologies\n\n## Labels\ncore, priority:high, phase:foundation",
-    "labels": ["core", "priority:high", "phase:foundation"]
+    "labels": ["core", "priority:high", "phase:foundation"],
+    "status": "in progress"
   },
   {
     "title": "Core: Domain Model - Executions and State",

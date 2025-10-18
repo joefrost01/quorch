@@ -18,14 +18,14 @@ Designed for data teams who want to ship fast without operational overhead. Defi
 - **🧪 Trial Run** - Test workflows without executing commands
 - **🎨 Modern UI** - Real-time monitoring with clean, professional interface
 - **🔌 Portable** - Local development, Docker, or Kubernetes
+- **📊 Advanced DAG Analysis** - Automatic cycle detection, parallel execution planning, and dependency resolution
 
 ## Quick Start
 
 ### Local Development
-
 ```bash
 # Clone and build
-git clone https://github.com/yourorg/quorch.git
+git clone https://github.com/joefrost01/quorch.git
 cd quorch
 ./mvnw clean package
 
@@ -50,7 +50,6 @@ open http://localhost:8080
 ```
 
 ### Docker
-
 ```bash
 docker build -f src/main/docker/Dockerfile.jvm -t quorch:latest .
 
@@ -66,7 +65,6 @@ docker run -p 8080:8080 \
 ### Tasks
 
 A task is a single unit of work - just a command to execute:
-
 ```yaml
 name: extract-data
 command: python
@@ -83,7 +81,6 @@ retry: 3
 ### Global Tasks
 
 Global tasks run once per unique parameter set and can be shared across multiple graphs:
-
 ```yaml
 name: load-market-data
 global: true
@@ -108,8 +105,7 @@ args:
 
 ### Graphs
 
-A graph is a DAG of tasks with dependencies:
-
+A graph is a DAG (Directed Acyclic Graph) of tasks with dependencies:
 ```yaml
 name: daily-etl
 description: Daily ETL pipeline
@@ -138,10 +134,59 @@ tasks:
       - load-market-data
 ```
 
+### DAG Analysis & Execution Planning
+
+Quorch uses JGraphT to provide powerful DAG analysis capabilities:
+
+**Automatic Cycle Detection**: Workflows are validated on load - circular dependencies are caught immediately with clear error messages.
+
+**Parallel Execution Planning**: Quorch automatically identifies tasks that can run in parallel:
+```yaml
+# This workflow has 3 execution levels:
+# Level 1: [extract] (1 task)
+# Level 2: [transform-a, transform-b, transform-c] (3 parallel tasks)
+# Level 3: [load] (1 task)
+
+name: parallel-etl
+tasks:
+  - name: extract
+    command: python
+    args: [extract.py]
+  
+  - name: transform-a
+    command: python
+    args: [transform_a.py]
+    depends_on: [extract]
+  
+  - name: transform-b
+    command: python
+    args: [transform_b.py]
+    depends_on: [extract]
+  
+  - name: transform-c
+    command: python
+    args: [transform_c.py]
+    depends_on: [extract]
+  
+  - name: load
+    command: python
+    args: [load.py]
+    depends_on: [transform-a, transform-b, transform-c]
+```
+
+**DAG Statistics**: Each graph provides execution insights:
+- Total tasks and execution depth
+- Maximum parallelism (tasks that can run simultaneously)
+- Root tasks (no dependencies) and leaf tasks (no dependents)
+- Critical path through the workflow
+
+**Smart Dependency Resolution**: Tasks are scheduled automatically as their dependencies complete, enabling efficient parallel execution without manual coordination.
+
+**Failure Propagation**: When a task fails, Quorch automatically determines which downstream tasks should be skipped, preventing wasted work on tasks that can't succeed.
+
 ## Expression Language
 
 Quorch uses JEXL for dynamic expressions in `${ }`:
-
 ```yaml
 # Variables
 args:
@@ -184,7 +229,6 @@ env:
 ## Configuration
 
 ### Development Mode
-
 ```yaml
 # application.yml
 orchestrator:
@@ -208,7 +252,6 @@ server:
 ```
 
 ### Production Mode
-
 ```yaml
 # application-prod.yml
 orchestrator:
@@ -241,6 +284,7 @@ orchestrator:
 ┌─────────────────────────────────────┐
 │      Single JVM Process             │
 │  - Orchestrator Core                │
+│  - DAG Evaluator (JGraphT)          │
 │  - Embedded Hazelcast               │
 │  - Embedded Worker (4 threads)      │
 │  - Web UI                           │
@@ -253,6 +297,8 @@ orchestrator:
 ┌────────────────┐     ┌─────────────────────┐
 │  Orchestrator  │────▶│  Worker Pods (HPA)  │
 │  (1 replica)   │     │  (2-20 replicas)    │
+│  - DAG Analysis│     │  - Multi-threaded   │
+│  - Scheduling  │     │  - Task Execution   │
 └────────┬───────┘     └──────────┬──────────┘
          │                        │
          ├────────────────────────┤
@@ -264,10 +310,20 @@ orchestrator:
     └─────────┘
 ```
 
+### How Execution Works
+
+1. **Graph Definition**: Load YAML files defining tasks and dependencies
+2. **DAG Construction**: Build directed acyclic graph using JGraphT
+3. **Validation**: Detect cycles, validate dependencies, analyze parallelism
+4. **Execution Planning**: Identify execution levels and ready tasks
+5. **Scheduling**: Queue tasks as dependencies complete
+6. **Worker Distribution**: Multi-threaded workers pull and execute tasks
+7. **State Management**: Track progress in Hazelcast, log events to files
+8. **Completion**: Notify dependent graphs, trigger downstream workflows
+
 ## Triggers
 
 ### Cron Schedule
-
 ```yaml
 name: nightly-report
 schedule: "0 2 * * *"  # 2 AM daily
@@ -278,7 +334,6 @@ tasks:
 ```
 
 ### Webhook
-
 ```bash
 curl -X POST http://localhost:8080/api/triggers/webhook/my-graph \
   -H "Content-Type: application/json" \
@@ -286,7 +341,6 @@ curl -X POST http://localhost:8080/api/triggers/webhook/my-graph \
 ```
 
 ### Google Pub/Sub
-
 ```yaml
 name: event-driven-pipeline
 triggers:
@@ -305,6 +359,10 @@ Access the web UI at `http://localhost:8080`:
 - **Dashboard** - System overview and recent activity
 - **Graphs** - Browse and execute workflows
 - **Graph Detail** - Real-time execution monitoring with DAG visualization
+    - Visual DAG showing task dependencies and parallel execution
+    - Color-coded nodes showing task status
+    - Gantt chart timeline view
+    - Live task progress updates
 - **Tasks** - View global tasks and executions
 - **Workers** - Monitor worker health and utilization
 - **Events** - Searchable event log
@@ -318,7 +376,6 @@ The UI uses Server-Sent Events (SSE) for real-time updates without polling.
 ## API
 
 ### Execute a Graph
-
 ```bash
 POST /api/graphs/{name}/execute
 {
@@ -330,19 +387,16 @@ POST /api/graphs/{name}/execute
 ```
 
 ### Get Execution Status
-
 ```bash
 GET /api/graphs/executions/{id}
 ```
 
 ### List Workers
-
 ```bash
 GET /api/workers
 ```
 
 ### Query Events
-
 ```bash
 GET /api/events?type=GRAPH_STARTED&since=2025-10-17T00:00:00Z
 ```
@@ -352,7 +406,6 @@ Full API documentation available at `/q/swagger-ui` when running.
 ## Deployment
 
 ### Kubernetes (GKE)
-
 ```bash
 # Create namespace
 kubectl create namespace orchestrator
@@ -377,7 +430,6 @@ kubectl port-forward -n orchestrator svc/orchestrator 8080:80
 ```
 
 ### Update Workflows in Production
-
 ```bash
 # Update ConfigMap
 kubectl create configmap workflow-config \
@@ -410,7 +462,6 @@ Metrics exposed at `/q/metrics`:
 ### Structured Logging
 
 Production uses JSON logging with structured fields:
-
 ```json
 {
   "timestamp": "2025-10-17T10:00:00Z",
@@ -429,7 +480,6 @@ Production uses JSON logging with structured fields:
 ### Hot Reload
 
 In dev mode, file changes trigger automatic reload:
-
 ```bash
 # Edit a graph
 vim graphs/my-graph.yaml
@@ -442,7 +492,6 @@ vim graphs/my-graph.yaml
 ### Trial Run Mode
 
 Test workflows without executing commands:
-
 ```yaml
 # application.yml
 orchestrator:
@@ -461,7 +510,6 @@ Output:
 ### Web-Based Editor
 
 Enable in-browser YAML editing (dev mode only):
-
 ```yaml
 orchestrator:
   dev:
@@ -492,7 +540,6 @@ Example:
 ## Event Log
 
 All events stored in JSONL files (local or GCS/S3):
-
 ```
 events/
 ├── 2025-10-15.jsonl
@@ -511,12 +558,12 @@ Events include:
 
 Quorch is ideal for:
 
-- **Data Engineering Pipelines** - ETL, ELT, data transformations
-- **Scheduled Jobs** - Reports, exports, cleanups
-- **Event-Driven Workflows** - Process events from Pub/Sub, webhooks
+- **Data Engineering Pipelines** - ETL, ELT, data transformations with complex dependencies
+- **Scheduled Jobs** - Reports, exports, cleanups that need parallel execution
+- **Event-Driven Workflows** - Process events from Pub/Sub, webhooks with automatic dependency management
 - **Multi-Cloud Deployments** - Works anywhere, no vendor lock-in
 - **Edge Computing** - Lightweight enough for edge locations
-- **Development Workflows** - CI/CD, testing, deployments
+- **Development Workflows** - CI/CD, testing, deployments with sophisticated dependency trees
 
 ## Not For
 
@@ -532,8 +579,8 @@ Quorch is ideal for:
 - **State**: Hazelcast (embedded dev, clustered prod)
 - **Events**: JSONL files (local/GCS/S3)
 - **UI**: Qute templates + Tabler CSS
-- **Expressions**: Apache Commons JEXL
-- **DAG**: JGraphT
+- **Expressions**: Apache Commons JEXL 3
+- **DAG**: JGraphT 1.5.2
 - **Scheduler**: Quarkus Quartz
 
 ## Contributing
@@ -546,6 +593,12 @@ Contributions welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guideli
 
 ## Roadmap
 
+- [x] Core DAG analysis and execution engine
+- [x] Expression language with built-in functions
+- [x] Hot reload and development mode
+- [ ] Graph Evaluator - execution orchestration (In Progress)
+- [ ] Worker pool implementation
+- [ ] Web UI with real-time updates
 - [ ] Multiple execution backends (ECS, Cloud Run)
 - [ ] Advanced retry policies (exponential backoff, jitter)
 - [ ] Task templates and libraries
@@ -558,8 +611,8 @@ Contributions welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guideli
 ## Support
 
 - **Documentation**: [docs/](docs/)
-- **Issues**: [GitHub Issues](https://github.com/yourorg/quorch/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/yourorg/quorch/discussions)
+- **Issues**: [GitHub Issues](https://github.com/joefrost01/quorch/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/joefrost01/quorch/discussions)
 
 ---
 
