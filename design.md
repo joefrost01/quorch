@@ -107,28 +107,32 @@ A lightweight, portable, event-driven workflow orchestrator that **gets out of y
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                         GKE Cluster                         │
+│                     Production Deployment                   │
 │                                                             │
-│  ┌──────────────────┐         ┌─────────────────────────┐   │
-│  │   Orchestrator   │         │   Worker Pods (HPA)     │   │
-│  │    (1 replica)   │         │                         │   │
-│  │                  │         │  ┌────────┐ ┌────────┐  │   │
-│  │  - Graph Eval    │         │  │Worker 1│ │Worker 2│  │   │
-│  │  - State Mgmt    │         │  │16 thrd │ │16 thrd │  │   │
-│  │  - UI (SSR)      │         │  └────────┘ └────────┘  │   │
-│  │  - API           │         │       ...               │   │
-│  └──────────────────┘         └─────────────────────────┘   │
-│         │                                                   │
-└─────────┼───────────────────────────────────────────────────┘
-          │
-    ┌─────┴─────┐
-    ▼           ▼
-┌────────┐  ┌────────────┐      ┌──────────────┐
-│Hazel-  │  │  GCS/S3    │      │ ConfigMap    │
-│cast    │  │            │      │              │
-│Cluster │  │ Events:    │      │ graphs/*.yaml│
-│(3 AZs) │  │ *.jsonl    │      │ tasks/*.yaml │
-└────────┘  └────────────┘      └──────────────┘
+│  ┌──────────────┐  ┌──────────────┐  ┌─────────────────┐    │
+│  │ Orchestrator │  │   Fabric     │  │    Workers      │    │
+│  │   (1-2x)     │  │  (3x AZs)    │  │   (2-20x HPA)   │    │
+│  │              │  │              │  │                 │    │
+│  │ - Scheduler  │  │ - Hazelcast  │  │ - Task Exec     │    │
+│  │ - Evaluator  │  │ - IMaps      │  │ - Multi-thread  │    │
+│  │ - API        │  │ - IQueues    │  │ - Heartbeat     │    │
+│  │ - NO UI      │  │ - State      │  │                 │    │
+│  └──────────────┘  └──────────────┘  └─────────────────┘    │
+│         │                  │                   │            │
+│         └──────────────────┴───────────────────┘            │
+│                            │                                │
+│                  ┌─────────┴─────────┐                      │
+│                  │   UI Server       │                      │
+│                  │   (1-2x)          │                      │
+│                  │                   │                      │
+│                  │ - Qute/Tabler     │                      │
+│                  │ - Alpine.js       │                      │
+│                  │ - HTMX            │                      │
+│                  │ - Cytoscape       │                      │
+│                  │ - Timeline.js     │                      │
+│                  │ - SSE streams     │                      │
+│                  └───────────────────┘                      │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -710,9 +714,9 @@ In dev mode, everything runs in one process:
 
 **Start command**:
 ```bash
-./orchestrator --profile=dev
+./quorch --profile=dev
 # or
-java -jar orchestrator.jar --profile=dev
+java -jar quorch.jar --profile=dev
 ```
 
 **Output**:
