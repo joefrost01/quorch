@@ -2,6 +2,7 @@ package org.neuralchilli.quorch.config;
 
 import com.hazelcast.config.Config;
 import com.hazelcast.config.SerializationConfig;
+import com.hazelcast.config.SerializerConfig;
 import com.hazelcast.core.Hazelcast;
 import com.hazelcast.core.HazelcastInstance;
 import io.quarkus.runtime.Startup;
@@ -38,20 +39,24 @@ public class HazelcastConfig {
         config.getNetworkConfig().getJoin().getMulticastConfig().setEnabled(false);
         config.getNetworkConfig().getJoin().getTcpIpConfig().setEnabled(false);
 
-        // Register custom serializers to handle Object-typed fields
+        // Configure serialization BEFORE registering serializers
         SerializationConfig serializationConfig = config.getSerializationConfig();
 
-        serializationConfig.addSerializerConfig(
-                new com.hazelcast.config.SerializerConfig()
-                        .setTypeClass(Parameter.class)
-                        .setImplementation(new HazelcastSerializers.ParameterSerializer())
-        );
+        // Disable compact serialization auto-detection for our types
+        serializationConfig.setAllowUnsafe(true);
+        serializationConfig.setEnableCompression(false);
+        serializationConfig.setEnableSharedObject(false);
 
-        serializationConfig.addSerializerConfig(
-                new com.hazelcast.config.SerializerConfig()
-                        .setTypeClass(TaskReference.class)
-                        .setImplementation(new HazelcastSerializers.TaskReferenceSerializer())
-        );
+        // Register custom serializers with explicit configuration
+        SerializerConfig paramConfig = new SerializerConfig();
+        paramConfig.setTypeClass(Parameter.class);
+        paramConfig.setImplementation(new HazelcastSerializers.ParameterSerializer());
+        serializationConfig.addSerializerConfig(paramConfig);
+
+        SerializerConfig taskRefConfig = new SerializerConfig();
+        taskRefConfig.setTypeClass(TaskReference.class);
+        taskRefConfig.setImplementation(new HazelcastSerializers.TaskReferenceSerializer());
+        serializationConfig.addSerializerConfig(taskRefConfig);
 
         log.info("Registered custom serializers for Parameter and TaskReference");
 

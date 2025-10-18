@@ -1,7 +1,5 @@
 package org.neuralchilli.quorch.config;
 
-import com.hazelcast.config.Config;
-import com.hazelcast.config.SerializationConfig;
 import com.hazelcast.nio.ObjectDataInput;
 import com.hazelcast.nio.ObjectDataOutput;
 import com.hazelcast.nio.serialization.StreamSerializer;
@@ -27,7 +25,7 @@ public class HazelcastSerializers {
             out.writeString(param.type().name());
             writeObject(out, param.defaultValue());
             out.writeBoolean(param.required());
-            out.writeString(param.description());
+            out.writeString(param.description() != null ? param.description() : "");
         }
 
         @Override
@@ -36,6 +34,9 @@ public class HazelcastSerializers {
             Object defaultValue = readObject(in);
             boolean required = in.readBoolean();
             String description = in.readString();
+            if (description.isEmpty()) {
+                description = null;
+            }
 
             return new Parameter(type, defaultValue, required, description);
         }
@@ -67,6 +68,13 @@ public class HazelcastSerializers {
             } else if (obj instanceof Double) {
                 out.writeByte(5);
                 out.writeDouble((Double) obj);
+            } else if (obj instanceof List) {
+                out.writeByte(6);
+                List<?> list = (List<?>) obj;
+                out.writeInt(list.size());
+                for (Object item : list) {
+                    writeObject(out, item);
+                }
             } else {
                 // Fallback to string representation
                 out.writeByte(1);
@@ -83,6 +91,14 @@ public class HazelcastSerializers {
                 case 3 -> in.readBoolean();
                 case 4 -> in.readLong();
                 case 5 -> in.readDouble();
+                case 6 -> {
+                    int size = in.readInt();
+                    List<Object> list = new ArrayList<>(size);
+                    for (int i = 0; i < size; i++) {
+                        list.add(readObject(in));
+                    }
+                    yield list;
+                }
                 default -> throw new IOException("Unknown object type: " + type);
             };
         }
@@ -97,11 +113,16 @@ public class HazelcastSerializers {
         @Override
         public void write(ObjectDataOutput out, TaskReference ref) throws IOException {
             // Write taskName (nullable)
-            out.writeString(ref.taskName());
+            boolean hasTaskName = ref.taskName() != null;
+            out.writeBoolean(hasTaskName);
+            if (hasTaskName) {
+                out.writeString(ref.taskName());
+            }
 
             // Write inlineTask (nullable)
-            out.writeBoolean(ref.inlineTask() != null);
-            if (ref.inlineTask() != null) {
+            boolean hasInlineTask = ref.inlineTask() != null;
+            out.writeBoolean(hasInlineTask);
+            if (hasInlineTask) {
                 writeTask(out, ref.inlineTask());
             }
 
@@ -117,15 +138,22 @@ public class HazelcastSerializers {
 
         @Override
         public TaskReference read(ObjectDataInput in) throws IOException {
-            String taskName = in.readString();
+            // Read taskName
+            String taskName = null;
+            if (in.readBoolean()) {
+                taskName = in.readString();
+            }
 
+            // Read inlineTask
             Task inlineTask = null;
             if (in.readBoolean()) {
                 inlineTask = readTask(in);
             }
 
+            // Read params
             Map<String, Object> params = readObjectMap(in);
 
+            // Read dependsOn
             int depsSize = in.readInt();
             List<String> dependsOn = new ArrayList<>(depsSize);
             for (int i = 0; i < depsSize; i++) {
@@ -147,13 +175,20 @@ public class HazelcastSerializers {
         private void writeTask(ObjectDataOutput out, Task task) throws IOException {
             out.writeString(task.name());
             out.writeBoolean(task.global());
-            out.writeString(task.key());
 
-            // Write params
+            // Write key (nullable)
+            boolean hasKey = task.key() != null;
+            out.writeBoolean(hasKey);
+            if (hasKey) {
+                out.writeString(task.key());
+            }
+
+            // Write params using ParameterSerializer
+            ParameterSerializer paramSerializer = new ParameterSerializer();
             out.writeInt(task.params().size());
             for (Map.Entry<String, Parameter> entry : task.params().entrySet()) {
                 out.writeString(entry.getKey());
-                new ParameterSerializer().write(out, entry.getValue());
+                paramSerializer.write(out, entry.getValue());
             }
 
             out.writeString(task.command());
@@ -184,14 +219,20 @@ public class HazelcastSerializers {
         private Task readTask(ObjectDataInput in) throws IOException {
             String name = in.readString();
             boolean global = in.readBoolean();
-            String key = in.readString();
 
-            // Read params
+            // Read key
+            String key = null;
+            if (in.readBoolean()) {
+                key = in.readString();
+            }
+
+            // Read params using ParameterSerializer
+            ParameterSerializer paramSerializer = new ParameterSerializer();
             int paramsSize = in.readInt();
             Map<String, Parameter> params = new HashMap<>(paramsSize);
             for (int i = 0; i < paramsSize; i++) {
                 String paramName = in.readString();
-                Parameter param = new ParameterSerializer().read(in);
+                Parameter param = paramSerializer.read(in);
                 params.put(paramName, param);
             }
 
@@ -261,6 +302,13 @@ public class HazelcastSerializers {
             } else if (obj instanceof Double) {
                 out.writeByte(5);
                 out.writeDouble((Double) obj);
+            } else if (obj instanceof List) {
+                out.writeByte(6);
+                List<?> list = (List<?>) obj;
+                out.writeInt(list.size());
+                for (Object item : list) {
+                    writeObject(out, item);
+                }
             } else {
                 out.writeByte(1);
                 out.writeString(obj.toString());
@@ -276,6 +324,14 @@ public class HazelcastSerializers {
                 case 3 -> in.readBoolean();
                 case 4 -> in.readLong();
                 case 5 -> in.readDouble();
+                case 6 -> {
+                    int size = in.readInt();
+                    List<Object> list = new ArrayList<>(size);
+                    for (int i = 0; i < size; i++) {
+                        list.add(readObject(in));
+                    }
+                    yield list;
+                }
                 default -> throw new IOException("Unknown object type: " + type);
             };
         }
