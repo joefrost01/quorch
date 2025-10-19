@@ -17,6 +17,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
@@ -140,8 +141,10 @@ public class GraphEvaluator {
     private void createTaskExecutions(GraphExecution graphExec, Graph graph) {
         log.debug("Creating task executions for graph: {}", graphExec.id());
 
-        // Batch collections for efficient updates
-        Map<UUID, TaskExecution> taskExecutionBatch = new HashMap<>();
+        // CRITICAL: Create task executions first, THEN populate index
+        // This ensures task executions exist before they can be looked up
+
+        List<TaskExecution> taskExecutionList = new ArrayList<>();
         Map<TaskExecutionLookupKey, UUID> indexBatch = new HashMap<>();
 
         for (TaskReference taskRef : graph.tasks()) {
@@ -150,7 +153,6 @@ public class GraphEvaluator {
 
             TaskExecutionKey globalKey = null;
             if (isGlobal) {
-                // Resolve global key for this task
                 globalKey = resolveGlobalKey(taskRef, graphExec, graph);
             }
 
@@ -161,10 +163,8 @@ public class GraphEvaluator {
                     globalKey
             );
 
-            // Add to batch
-            taskExecutionBatch.put(taskExec.id(), taskExec);
+            taskExecutionList.add(taskExec);
 
-            // CRITICAL: Add to index batch
             TaskExecutionLookupKey lookupKey = new TaskExecutionLookupKey(
                     graphExec.id(), taskName);
             indexBatch.put(lookupKey, taskExec.id());
@@ -173,28 +173,47 @@ public class GraphEvaluator {
                     taskExec.id(), taskName, isGlobal);
         }
 
-        // CRITICAL: Write both maps in sequence, then flush in test mode
+        // STEP 1: Write all task executions
+        Map<UUID, TaskExecution> taskExecutionBatch = taskExecutionList.stream()
+                .collect(Collectors.toMap(TaskExecution::id, Function.identity()));
+
         log.debug("Writing {} task executions to Hazelcast", taskExecutionBatch.size());
         taskExecutions.putAll(taskExecutionBatch);
 
+        // STEP 2: Write index (task executions must exist first!)
         log.debug("Writing {} index entries to Hazelcast", indexBatch.size());
         taskExecutionIndex.putAll(indexBatch);
 
-        // CRITICAL FOR TESTS: Ensure all writes are immediately visible
+        // STEP 3: In test mode, force immediate visibility
         if (testMode) {
             log.debug("Test mode: flushing task executions and index");
             taskExecutions.flush();
             taskExecutionIndex.flush();
 
-            // Verify index was populated (debug only)
-            for (TaskExecutionLookupKey key : indexBatch.keySet()) {
-                UUID verifyId = taskExecutionIndex.get(key);
-                if (verifyId == null) {
-                    log.error("CRITICAL: Index entry not found after flush: {}", key);
-                } else {
-                    log.trace("Verified index entry: {} -> {}", key.taskName(), verifyId);
+            // VERIFY: In test mode, verify writes succeeded
+            log.debug("Test mode: verifying task executions were created");
+            for (TaskExecution te : taskExecutionList) {
+                TaskExecution verify = taskExecutions.get(te.id());
+                if (verify == null) {
+                    log.error("CRITICAL: Task execution not found after flush: {}", te.id());
+                    throw new IllegalStateException(
+                            "Task execution not persisted: " + te.taskName());
                 }
             }
+
+            log.debug("Test mode: verifying index entries were created");
+            for (Map.Entry<TaskExecutionLookupKey, UUID> entry : indexBatch.entrySet()) {
+                UUID verifyId = taskExecutionIndex.get(entry.getKey());
+                if (verifyId == null) {
+                    log.error("CRITICAL: Index entry not found after flush: {}", entry.getKey());
+                    throw new IllegalStateException(
+                            "Index entry not persisted for task: " + entry.getKey().taskName());
+                }
+                log.trace("Verified index entry: {} -> {}", entry.getKey().taskName(), verifyId);
+            }
+
+            log.debug("Test mode: All {} task executions and index entries verified",
+                    taskExecutionList.size());
         }
 
         log.debug("Created {} task executions for graph: {}", graph.tasks().size(), graphExec.id());
