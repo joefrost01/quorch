@@ -428,13 +428,13 @@ public class GraphEvaluator {
                 TaskReference taskRef = findTaskReference(graph, taskName);
                 Map<String, Object> params = resolveParameters(taskDef, taskRef, graph, graphExec);
 
-                // Create global execution
+                // Create global execution with QUEUED status initially
                 GlobalTaskExecution newGlobalExec = GlobalTaskExecution.create(
                         taskName,
                         key.resolvedKey(),
                         params,
                         graphExec.id()
-                );
+                ).queue();  // CRITICAL FIX: Set to QUEUED immediately
 
                 // Try to insert atomically
                 GlobalTaskExecution existing = globalTasks.putIfAbsent(key, newGlobalExec);
@@ -474,9 +474,9 @@ public class GraphEvaluator {
                 if (globalExec.linkedGraphExecutions().contains(graphExec.id())) {
                     log.info("Graph {} already linked to global task {}", graphExec.id(), key);
 
-                    // Update task execution to QUEUED
-                    TaskExecution queued = taskExec.queue();
-                    taskExecutions.put(queued.id(), queued);
+                    // Update task execution to match global task status
+                    TaskExecution updated = taskExec.withStatus(globalExec.status());
+                    taskExecutions.put(updated.id(), updated);
 
                     if (testMode) {
                         taskExecutions.flush();
@@ -493,8 +493,8 @@ public class GraphEvaluator {
                     // Success!
                     log.info("Successfully linked graph {} to global task {}", graphExec.id(), key);
 
-                    // Update task execution to QUEUED
-                    TaskExecution queued = taskExec.queue();
+                    // Update task execution to match global task status
+                    TaskExecution queued = taskExec.withStatus(updated.status());
                     taskExecutions.put(queued.id(), queued);
 
                     if (testMode) {
