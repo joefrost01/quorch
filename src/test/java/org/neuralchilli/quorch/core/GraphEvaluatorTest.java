@@ -16,6 +16,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
@@ -45,6 +46,7 @@ class GraphEvaluatorTest {
     private IMap<UUID, GraphExecution> graphExecutions;
     private IMap<UUID, TaskExecution> taskExecutions;
     private IMap<TaskExecutionKey, GlobalTaskExecution> globalTasks;
+    IMap<TaskExecutionKey, Set<UUID>> globalTaskLinks;
     private IMap<TaskExecutionLookupKey, UUID> taskExecutionIndex;
     private IQueue<WorkMessage> workQueue;
 
@@ -59,6 +61,7 @@ class GraphEvaluatorTest {
         graphExecutions = hazelcast.getMap("graph-executions");
         taskExecutions = hazelcast.getMap("task-executions");
         globalTasks = hazelcast.getMap("global-tasks");
+        globalTaskLinks = hazelcast.getMap("global-task-links");
         taskExecutionIndex = hazelcast.getMap("task-execution-index");
         workQueue = hazelcast.getQueue("work-queue");
 
@@ -68,6 +71,7 @@ class GraphEvaluatorTest {
         graphExecutions.clear();
         taskExecutions.clear();
         globalTasks.clear();
+        globalTaskLinks.clear();
         taskExecutionIndex.clear();
         workQueue.clear();
 
@@ -77,6 +81,7 @@ class GraphEvaluatorTest {
         graphExecutions.flush();
         taskExecutions.flush();
         globalTasks.flush();
+        globalTaskLinks.flush();
         taskExecutionIndex.flush();
 
         // Small delay to ensure all cleanup is complete
