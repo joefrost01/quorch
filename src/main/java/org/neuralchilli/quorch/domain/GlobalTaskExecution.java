@@ -2,14 +2,15 @@ package org.neuralchilli.quorch.domain;
 
 import java.io.Serializable;
 import java.time.Instant;
-import java.util.HashSet;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
 
 /**
  * Represents execution of a global task shared across multiple graphs.
  * Stored in Hazelcast for deduplication and state sharing.
+ *
+ * NOTE: Linked graph executions are tracked separately in globalTaskLinks map
+ * to avoid race conditions between linking and task state updates.
  */
 public record GlobalTaskExecution(
         UUID id,
@@ -17,7 +18,6 @@ public record GlobalTaskExecution(
         String resolvedKey,
         Map<String, Object> params,
         TaskStatus status,
-        Set<UUID> linkedGraphExecutions,
         String workerId,
         String threadName,
         Instant startedAt,
@@ -44,9 +44,6 @@ public record GlobalTaskExecution(
         if (params == null) {
             params = Map.of();
         }
-        if (linkedGraphExecutions == null) {
-            linkedGraphExecutions = Set.of();
-        }
         if (result == null) {
             result = Map.of();
         }
@@ -58,8 +55,7 @@ public record GlobalTaskExecution(
     public static GlobalTaskExecution create(
             String taskName,
             String resolvedKey,
-            Map<String, Object> params,
-            UUID initialGraphExecutionId
+            Map<String, Object> params
     ) {
         return new GlobalTaskExecution(
                 UUID.randomUUID(),
@@ -67,7 +63,6 @@ public record GlobalTaskExecution(
                 resolvedKey,
                 params,
                 TaskStatus.PENDING,
-                Set.of(initialGraphExecutionId),
                 null,
                 null,
                 null,
@@ -78,24 +73,11 @@ public record GlobalTaskExecution(
     }
 
     /**
-     * Link another graph execution to this task
-     */
-    public GlobalTaskExecution linkGraph(UUID graphExecutionId) {
-        Set<UUID> updated = new HashSet<>(linkedGraphExecutions);
-        updated.add(graphExecutionId);
-
-        return new GlobalTaskExecution(
-                id, taskName, resolvedKey, params, status, updated,
-                workerId, threadName, startedAt, completedAt, result, error
-        );
-    }
-
-    /**
      * Update status
      */
     public GlobalTaskExecution withStatus(TaskStatus newStatus) {
         return new GlobalTaskExecution(
-                id, taskName, resolvedKey, params, newStatus, linkedGraphExecutions,
+                id, taskName, resolvedKey, params, newStatus,
                 workerId, threadName, startedAt, completedAt, result, error
         );
     }
@@ -112,7 +94,7 @@ public record GlobalTaskExecution(
      */
     public GlobalTaskExecution start(String workerId, String threadName) {
         return new GlobalTaskExecution(
-                id, taskName, resolvedKey, params, TaskStatus.RUNNING, linkedGraphExecutions,
+                id, taskName, resolvedKey, params, TaskStatus.RUNNING,
                 workerId, threadName, Instant.now(), null, result, error
         );
     }
@@ -122,7 +104,7 @@ public record GlobalTaskExecution(
      */
     public GlobalTaskExecution complete(Map<String, Object> taskResult) {
         return new GlobalTaskExecution(
-                id, taskName, resolvedKey, params, TaskStatus.COMPLETED, linkedGraphExecutions,
+                id, taskName, resolvedKey, params, TaskStatus.COMPLETED,
                 workerId, threadName, startedAt, Instant.now(), taskResult, null
         );
     }
@@ -132,7 +114,7 @@ public record GlobalTaskExecution(
      */
     public GlobalTaskExecution fail(String errorMessage) {
         return new GlobalTaskExecution(
-                id, taskName, resolvedKey, params, TaskStatus.FAILED, linkedGraphExecutions,
+                id, taskName, resolvedKey, params, TaskStatus.FAILED,
                 workerId, threadName, startedAt, Instant.now(), result, errorMessage
         );
     }
@@ -149,12 +131,5 @@ public record GlobalTaskExecution(
      */
     public boolean isFinished() {
         return status.isTerminal();
-    }
-
-    /**
-     * Get number of linked graphs
-     */
-    public int linkedGraphCount() {
-        return linkedGraphExecutions.size();
     }
 }

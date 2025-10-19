@@ -9,9 +9,7 @@ import org.neuralchilli.quorch.domain.TaskStatus;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -19,7 +17,8 @@ import java.util.UUID;
  * Critical for performance as global tasks are frequently read/updated by multiple graphs.
  *
  * Performance: ~5x faster than Java serialization, ~3x smaller payload.
- * Especially important for the linkedGraphExecutions set which grows with graph count.
+ *
+ * NOTE: linkedGraphExecutions removed - tracked separately in globalTaskLinks map
  */
 public class GlobalTaskExecutionSerializer implements StreamSerializer<GlobalTaskExecution> {
 
@@ -57,8 +56,7 @@ public class GlobalTaskExecutionSerializer implements StreamSerializer<GlobalTas
         // Result map
         writeStringObjectMap(out, exec.result());
 
-        // Linked graph executions (Set<UUID>)
-        writeUUIDSet(out, exec.linkedGraphExecutions());
+        // NOTE: No more linkedGraphExecutions to serialize
     }
 
     @Override
@@ -88,8 +86,7 @@ public class GlobalTaskExecutionSerializer implements StreamSerializer<GlobalTas
         // Result
         Map<String, Object> result = readStringObjectMap(in);
 
-        // Linked graphs
-        Set<UUID> linkedGraphExecutions = readUUIDSet(in);
+        // NOTE: No more linkedGraphExecutions to deserialize
 
         return new GlobalTaskExecution(
                 id,
@@ -97,7 +94,6 @@ public class GlobalTaskExecutionSerializer implements StreamSerializer<GlobalTas
                 resolvedKey,
                 params,
                 status,
-                linkedGraphExecutions,
                 workerId,
                 threadName,
                 startedAt,
@@ -117,32 +113,6 @@ public class GlobalTaskExecutionSerializer implements StreamSerializer<GlobalTas
         long mostSigBits = in.readLong();
         long leastSigBits = in.readLong();
         return new UUID(mostSigBits, leastSigBits);
-    }
-
-    // UUID Set helpers
-    private void writeUUIDSet(ObjectDataOutput out, Set<UUID> set) throws IOException {
-        if (set == null) {
-            out.writeInt(0);
-            return;
-        }
-
-        out.writeInt(set.size());
-        for (UUID uuid : set) {
-            writeUUID(out, uuid);
-        }
-    }
-
-    private Set<UUID> readUUIDSet(ObjectDataInput in) throws IOException {
-        int size = in.readInt();
-        if (size == 0) {
-            return Set.of();
-        }
-
-        Set<UUID> set = new HashSet<>(size);
-        for (int i = 0; i < size; i++) {
-            set.add(readUUID(in));
-        }
-        return set;
     }
 
     // Nullable String helpers

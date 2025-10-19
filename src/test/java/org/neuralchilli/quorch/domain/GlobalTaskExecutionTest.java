@@ -10,12 +10,10 @@ class GlobalTaskExecutionTest {
 
     @Test
     void shouldCreateNewGlobalExecution() {
-        UUID graphExecId = UUID.randomUUID();
         GlobalTaskExecution exec = GlobalTaskExecution.create(
                 "load-data",
                 "load_2025-10-17_us",
-                Map.of("date", "2025-10-17", "region", "us"),
-                graphExecId
+                Map.of("date", "2025-10-17", "region", "us")
         );
 
         assertThat(exec.id()).isNotNull();
@@ -23,29 +21,12 @@ class GlobalTaskExecutionTest {
         assertThat(exec.resolvedKey()).isEqualTo("load_2025-10-17_us");
         assertThat(exec.params()).containsEntry("date", "2025-10-17");
         assertThat(exec.status()).isEqualTo(TaskStatus.PENDING);
-        assertThat(exec.linkedGraphExecutions()).containsExactly(graphExecId);
-        assertThat(exec.linkedGraphCount()).isEqualTo(1);
-    }
-
-    @Test
-    void shouldLinkAdditionalGraphs() {
-        UUID graph1 = UUID.randomUUID();
-        UUID graph2 = UUID.randomUUID();
-
-        GlobalTaskExecution exec = GlobalTaskExecution.create(
-                "task", "key", Map.of(), graph1
-        );
-
-        GlobalTaskExecution linked = exec.linkGraph(graph2);
-
-        assertThat(linked.linkedGraphExecutions()).containsExactlyInAnyOrder(graph1, graph2);
-        assertThat(linked.linkedGraphCount()).isEqualTo(2);
     }
 
     @Test
     void shouldQueueGlobalTask() {
         GlobalTaskExecution exec = GlobalTaskExecution.create(
-                "task", "key", Map.of(), UUID.randomUUID()
+                "task", "key", Map.of()
         );
         GlobalTaskExecution queued = exec.queue();
 
@@ -55,7 +36,7 @@ class GlobalTaskExecutionTest {
     @Test
     void shouldStartGlobalTask() {
         GlobalTaskExecution exec = GlobalTaskExecution.create(
-                "task", "key", Map.of(), UUID.randomUUID()
+                "task", "key", Map.of()
         );
         GlobalTaskExecution started = exec.start("worker-1", "thread-1");
 
@@ -68,7 +49,7 @@ class GlobalTaskExecutionTest {
     @Test
     void shouldCompleteGlobalTask() {
         GlobalTaskExecution exec = GlobalTaskExecution.create(
-                "task", "key", Map.of(), UUID.randomUUID()
+                "task", "key", Map.of()
         );
         GlobalTaskExecution started = exec.start("worker-1", "thread-1");
         GlobalTaskExecution completed = started.complete(Map.of("rows", 1000));
@@ -82,7 +63,7 @@ class GlobalTaskExecutionTest {
     @Test
     void shouldFailGlobalTask() {
         GlobalTaskExecution exec = GlobalTaskExecution.create(
-                "task", "key", Map.of(), UUID.randomUUID()
+                "task", "key", Map.of()
         );
         GlobalTaskExecution started = exec.start("worker-1", "thread-1");
         GlobalTaskExecution failed = started.fail("Connection timeout");
@@ -95,7 +76,7 @@ class GlobalTaskExecutionTest {
     @Test
     void shouldGetExecutionKey() {
         GlobalTaskExecution exec = GlobalTaskExecution.create(
-                "load-data", "load_2025-10-17", Map.of(), UUID.randomUUID()
+                "load-data", "load_2025-10-17", Map.of()
         );
         TaskExecutionKey key = exec.getKey();
 
@@ -106,12 +87,12 @@ class GlobalTaskExecutionTest {
     @Test
     void shouldRejectNullValues() {
         assertThatThrownBy(() -> GlobalTaskExecution.create(
-                null, "key", Map.of(), UUID.randomUUID()
+                null, "key", Map.of()
         )).isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Task name cannot be null");
 
         assertThatThrownBy(() -> GlobalTaskExecution.create(
-                "task", null, Map.of(), UUID.randomUUID()
+                "task", null, Map.of()
         )).isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Resolved key cannot be null");
     }

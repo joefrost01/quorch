@@ -20,7 +20,6 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
-
 import static org.assertj.core.api.Assertions.*;
 import static org.awaitility.Awaitility.await;
 
@@ -46,7 +45,7 @@ class GraphEvaluatorTest {
     private IMap<UUID, GraphExecution> graphExecutions;
     private IMap<UUID, TaskExecution> taskExecutions;
     private IMap<TaskExecutionKey, GlobalTaskExecution> globalTasks;
-    IMap<TaskExecutionKey, Set<UUID>> globalTaskLinks;
+    private IMap<TaskExecutionKey, Set<UUID>> globalTaskLinks;
     private IMap<TaskExecutionLookupKey, UUID> taskExecutionIndex;
     private IQueue<WorkMessage> workQueue;
 
@@ -105,6 +104,7 @@ class GraphEvaluatorTest {
         if (graphExecutions != null) graphExecutions.clear();
         if (taskExecutions != null) taskExecutions.clear();
         if (globalTasks != null) globalTasks.clear();
+        if (globalTaskLinks != null) globalTaskLinks.clear();
         if (taskExecutionIndex != null) taskExecutionIndex.clear();
         if (workQueue != null) workQueue.clear();
     }
@@ -379,7 +379,11 @@ class GraphEvaluatorTest {
 
         assertThat(globalExec.taskName()).isEqualTo("load-data");
         assertThat(globalExec.resolvedKey()).isEqualTo("load_2025-10-18");
-        assertThat(globalExec.linkedGraphExecutions()).contains(executionId);
+
+        // Check the separate globalTaskLinks map for linked graphs
+        TaskExecutionKey key = globalExec.getKey();
+        Set<UUID> linkedGraphs = globalTaskLinks.get(key);
+        assertThat(linkedGraphs).contains(executionId);
 
         // Wait for completion
         await().atMost(5, TimeUnit.SECONDS).untilAsserted(() -> {
@@ -390,6 +394,9 @@ class GraphEvaluatorTest {
 
     @Test
     void shouldDeduplicateGlobalTasks() {
+        // CRITICAL: Ensure worker pool is running
+        workerPool.start(2);
+
         // Given: A global task
         Task globalTask = Task.builder("load-data")
                 .global(true)
@@ -438,12 +445,29 @@ class GraphEvaluatorTest {
                     .as("Global task should be queued or running")
                     .isIn(TaskStatus.QUEUED, TaskStatus.RUNNING);
 
+            // Check linked graphs in separate map
+            TaskExecutionKey key = gte.getKey();
+            Set<UUID> linkedGraphs = globalTaskLinks.get(key);
+
             log.info("Global task created with status: {}, linked graphs: {}",
-                    gte.status(), gte.linkedGraphExecutions());
+                    gte.status(), linkedGraphs);
+        });
+
+        // Wait for the global task to actually complete before starting second graph
+        await().atMost(3, TimeUnit.SECONDS).untilAsserted(() -> {
+            GlobalTaskExecution gte = globalTasks.values().stream()
+                    .filter(g -> g.taskName().equals("load-data"))
+                    .findFirst()
+                    .orElseThrow();
+
+            assertThat(gte.status())
+                    .as("Global task should complete before second graph starts")
+                    .isEqualTo(TaskStatus.COMPLETED);
         });
 
         // Ensure global task state is fully propagated
         globalTasks.flush();
+        globalTaskLinks.flush();
         try { Thread.sleep(100); } catch (InterruptedException e) {}
 
         // When: Second graph executes with same parameters
@@ -462,19 +486,22 @@ class GraphEvaluatorTest {
                     .isEqualTo(1);
         });
 
-        // FIXED: Wait for global task to have both graphs linked
+        // Check linked graphs in the separate globalTaskLinks map
         await().atMost(3, TimeUnit.SECONDS).untilAsserted(() -> {
             GlobalTaskExecution globalExec = globalTasks.values().stream()
                     .filter(gte -> gte.taskName().equals("load-data"))
                     .findFirst()
                     .orElseThrow(() -> new AssertionError("Global task not found"));
 
-            log.info("Current global task state - Status: {}, Linked graphs: {}",
-                    globalExec.status(), globalExec.linkedGraphExecutions());
+            TaskExecutionKey key = globalExec.getKey();
+            Set<UUID> linkedGraphs = globalTaskLinks.get(key);
 
-            // Global task should have both graphs linked
-            assertThat(globalExec.linkedGraphExecutions())
-                    .as("Global task should be linked to both graph executions")
+            log.info("Current global task state - Status: {}, Linked graphs in map: {}",
+                    globalExec.status(), linkedGraphs);
+
+            // Global task links should have both graphs linked
+            assertThat(linkedGraphs)
+                    .as("Global task links should contain both graph executions")
                     .hasSize(2)
                     .containsExactlyInAnyOrder(exec1, exec2);
         });
@@ -485,8 +512,11 @@ class GraphEvaluatorTest {
             GraphExecution graphExec2 = graphExecutions.get(exec2);
 
             log.info("Graph 1 status: {}, Graph 2 status: {}",
-                    graphExec1.status(), graphExec2.status());
+                    graphExec1 != null ? graphExec1.status() : "null",
+                    graphExec2 != null ? graphExec2.status() : "null");
 
+            assertThat(graphExec1).isNotNull();
+            assertThat(graphExec2).isNotNull();
             assertThat(graphExec1.status()).isEqualTo(GraphStatus.COMPLETED);
             assertThat(graphExec2.status()).isEqualTo(GraphStatus.COMPLETED);
         });
