@@ -106,6 +106,9 @@ public class GraphEvaluator {
             graphExecutions.flush();
             taskExecutions.flush();
             taskExecutionIndex.flush();
+
+            // Additional delay to ensure full propagation
+            try { Thread.sleep(50); } catch (InterruptedException e) {}
         }
 
         // Trigger initial evaluation - synchronous in test mode, async in production
@@ -137,6 +140,8 @@ public class GraphEvaluator {
     /**
      * Create task execution records for all tasks in the graph.
      * Initializes all tasks as PENDING and ensures index is populated.
+     *
+     * CRITICAL FIX: Ensures complete state consistency before proceeding.
      */
     private void createTaskExecutions(GraphExecution graphExec, Graph graph) {
         log.debug("Creating task executions for graph: {}", graphExec.id());
@@ -184,11 +189,14 @@ public class GraphEvaluator {
         log.debug("Writing {} index entries to Hazelcast", indexBatch.size());
         taskExecutionIndex.putAll(indexBatch);
 
-        // STEP 3: In test mode, force immediate visibility
+        // STEP 3: In test mode, force immediate visibility and verify
         if (testMode) {
             log.debug("Test mode: flushing task executions and index");
             taskExecutions.flush();
             taskExecutionIndex.flush();
+
+            // Additional delay for full propagation
+            try { Thread.sleep(50); } catch (InterruptedException e) {}
 
             // VERIFY: In test mode, verify writes succeeded
             log.debug("Test mode: verifying task executions were created");
@@ -212,7 +220,21 @@ public class GraphEvaluator {
                 log.trace("Verified index entry: {} -> {}", entry.getKey().taskName(), verifyId);
             }
 
-            log.debug("Test mode: All {} task executions and index entries verified",
+            // STEP 4: Final verification - ensure lookups work end-to-end
+            log.debug("Test mode: final verification of task execution accessibility");
+            for (TaskReference taskRef : graph.tasks()) {
+                String taskName = taskRef.getEffectiveName();
+
+                TaskExecution verify = findTaskExecutionOptimized(graphExec.id(), taskName);
+                if (verify == null) {
+                    log.error("CRITICAL: Cannot find task execution via optimized lookup for task: {}", taskName);
+                    throw new IllegalStateException(
+                            "Task execution lookup failed for: " + taskName);
+                }
+                log.trace("Verified accessible via optimized lookup: {}", taskName);
+            }
+
+            log.debug("Test mode: All {} task executions and index entries verified and accessible",
                     taskExecutionList.size());
         }
 
@@ -487,23 +509,65 @@ public class GraphEvaluator {
 
     /**
      * Schedule a regular (non-global) task.
+     *
+     * CRITICAL FIX: Enhanced lookup with fallback and better error handling.
      */
     private void scheduleRegularTask(String taskName, GraphExecution graphExec, Graph graph) {
         log.debug("Scheduling regular task: {} for graph: {}", taskName, graphExec.id());
+
+        // CRITICAL FIX: In test mode, force Hazelcast sync before lookup
+        if (testMode) {
+            taskExecutions.flush();
+            taskExecutionIndex.flush();
+
+            // Small delay to ensure propagation
+            try { Thread.sleep(20); } catch (InterruptedException e) {}
+        }
 
         // Find task execution using optimized lookup
         TaskExecution taskExec = findTaskExecutionOptimized(graphExec.id(), taskName);
 
         if (taskExec == null) {
-            log.error("Task execution not found: {} in graph: {}", taskName, graphExec.id());
+            log.error("Task execution not found via optimized lookup: {} in graph: {}",
+                    taskName, graphExec.id());
 
-            // DEBUG: Log what's in the index
+            // DEBUG: Log diagnostic information
+            log.error("Total task executions in map: {}", taskExecutions.size());
+            log.error("Total index entries: {}", taskExecutionIndex.size());
+
+            // DEBUG: Log what's in the index for this graph
             log.error("Index contents for graph {}:", graphExec.id());
             taskExecutionIndex.keySet().stream()
                     .filter(key -> key.graphExecutionId().equals(graphExec.id()))
-                    .forEach(key -> log.error("  Found indexed task: {}", key.taskName()));
+                    .forEach(key -> {
+                        UUID id = taskExecutionIndex.get(key);
+                        log.error("  Indexed task: {} -> {}", key.taskName(), id);
+                    });
 
-            return;
+            // FALLBACK: Try direct map scan
+            log.error("Attempting fallback: direct map scan");
+            TaskExecution fallback = taskExecutions.values().stream()
+                    .filter(te -> te.graphExecutionId().equals(graphExec.id()))
+                    .filter(te -> te.taskName().equals(taskName))
+                    .findFirst()
+                    .orElse(null);
+
+            if (fallback != null) {
+                log.error("FOUND via fallback scan: {} (status: {})",
+                        fallback.taskName(), fallback.status());
+                taskExec = fallback;
+
+                // Fix the index
+                TaskExecutionLookupKey lookupKey = new TaskExecutionLookupKey(
+                        graphExec.id(), taskName);
+                taskExecutionIndex.put(lookupKey, fallback.id());
+                log.error("Repaired index entry for: {}", taskName);
+            } else {
+                log.error("Task execution not found via fallback either");
+                throw new IllegalStateException(
+                        "Task execution not found anywhere for: " + taskName +
+                                " in graph: " + graphExec.id());
+            }
         }
 
         // Get task definition (inline or global)
@@ -522,6 +586,8 @@ public class GraphEvaluator {
      *
      * PERFORMANCE OPTIMIZATION: Replace distributed lock with compare-and-swap
      * This eliminates lock contention when multiple graphs use the same global task
+     *
+     * CRITICAL FIX: Enhanced state propagation for test mode.
      */
     private void scheduleGlobalTask(String taskName, GraphExecution graphExec, Graph graph) {
         log.info("Scheduling global task: {} for graph: {}", taskName, graphExec.id());
@@ -581,6 +647,9 @@ public class GraphEvaluator {
                     if (testMode) {
                         globalTasks.flush();
                         taskExecutions.flush();
+
+                        // Extra delay to ensure propagation
+                        try { Thread.sleep(50); } catch (InterruptedException e) {}
                     }
 
                     // Schedule it
@@ -611,6 +680,7 @@ public class GraphEvaluator {
 
                     if (testMode) {
                         taskExecutions.flush();
+                        try { Thread.sleep(20); } catch (InterruptedException e) {}
                     }
                     return;
                 }
@@ -630,6 +700,9 @@ public class GraphEvaluator {
                     if (testMode) {
                         globalTasks.flush();
                         taskExecutions.flush();
+
+                        // Extra delay for propagation
+                        try { Thread.sleep(50); } catch (InterruptedException e) {}
                     }
 
                     return;
@@ -650,6 +723,7 @@ public class GraphEvaluator {
 
                 if (testMode) {
                     taskExecutions.flush();
+                    try { Thread.sleep(20); } catch (InterruptedException e) {}
                 }
 
                 // Re-evaluate graph to schedule downstream tasks
@@ -665,6 +739,7 @@ public class GraphEvaluator {
 
                 if (testMode) {
                     taskExecutions.flush();
+                    try { Thread.sleep(20); } catch (InterruptedException e) {}
                 }
 
                 // Re-evaluate graph to mark downstream as skipped
