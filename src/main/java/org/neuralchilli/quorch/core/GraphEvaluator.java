@@ -388,7 +388,6 @@ public class GraphEvaluator {
     private void scheduleGlobalTask(String taskName, GraphExecution graphExec, Graph graph) {
         log.info("Scheduling global task: {} for graph: {}", taskName, graphExec.id());
 
-        // Find task execution (optimized lookup)
         TaskExecution taskExec = findTaskExecutionOptimized(graphExec.id(), taskName);
         if (taskExec == null) {
             log.error("Task execution not found: {} in graph: {}", taskName, graphExec.id());
@@ -398,12 +397,10 @@ public class GraphEvaluator {
         TaskExecutionKey key = taskExec.globalKey();
         log.info("Global task key: {}", key);
 
-        // OPTIMISTIC LOCKING: Use compare-and-swap with improved retry logic
         for (int attempt = 0; attempt < MAX_OPTIMISTIC_LOCK_RETRIES; attempt++) {
-            // Add progressive backoff between retries
             if (attempt > 0) {
                 try {
-                    Thread.sleep(20 * attempt);  // Progressive backoff
+                    Thread.sleep(20 * attempt);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     break;
@@ -413,10 +410,9 @@ public class GraphEvaluator {
             GlobalTaskExecution globalExec = globalTasks.get(key);
 
             if (globalExec == null) {
-                // First graph to need this global task - try to create it
+                // First graph - create new global task
                 log.info("Attempting to create new global task execution: {} (attempt {})", key, attempt + 1);
 
-                // Get task definition
                 Task taskDef = hazelcast.<String, Task>getMap("task-definitions").get(taskName);
                 if (taskDef == null) {
                     log.error("Global task definition not found: {}", taskName);
@@ -424,126 +420,106 @@ public class GraphEvaluator {
                     return;
                 }
 
-                // Resolve parameters
                 TaskReference taskRef = findTaskReference(graph, taskName);
                 Map<String, Object> params = resolveParameters(taskDef, taskRef, graph, graphExec);
 
-                // Create global execution with QUEUED status initially
                 GlobalTaskExecution newGlobalExec = GlobalTaskExecution.create(
                         taskName,
                         key.resolvedKey(),
                         params,
                         graphExec.id()
-                ).queue();  // CRITICAL FIX: Set to QUEUED immediately
+                ).queue();
 
-                // Try to insert atomically
                 GlobalTaskExecution existing = globalTasks.putIfAbsent(key, newGlobalExec);
                 if (existing == null) {
-                    // Success! We created it
                     log.info("Successfully created global task execution: {}", newGlobalExec.id());
 
-                    // Mark task execution as queued
                     TaskExecution queued = taskExec.queue();
                     taskExecutions.put(queued.id(), queued);
 
-                    // Force flush in test mode
                     if (testMode) {
                         globalTasks.flush();
                         taskExecutions.flush();
                         try { Thread.sleep(50); } catch (InterruptedException e) {}
                     }
 
-                    // Schedule it
                     scheduleTask(taskExec, taskDef, graphExec);
                     return;
                 } else {
-                    // Someone else created it, continue to link logic
                     globalExec = existing;
                 }
             }
 
-            // Existing global task - try to link
-            if (globalExec.status() == TaskStatus.PENDING ||
-                    globalExec.status() == TaskStatus.RUNNING ||
-                    globalExec.status() == TaskStatus.QUEUED) {
+            // Check if already linked
+            if (globalExec.linkedGraphExecutions().contains(graphExec.id())) {
+                log.info("Graph {} already linked to global task {}", graphExec.id(), key);
 
-                log.info("Linking graph {} to existing global task: {} (attempt {})",
-                        graphExec.id(), key, attempt + 1);
-
-                // Check if already linked (idempotency)
-                if (globalExec.linkedGraphExecutions().contains(graphExec.id())) {
-                    log.info("Graph {} already linked to global task {}", graphExec.id(), key);
-
-                    // Update task execution to match global task status
-                    TaskExecution updated = taskExec.withStatus(globalExec.status());
-                    taskExecutions.put(updated.id(), updated);
-
-                    if (testMode) {
-                        taskExecutions.flush();
-                        try { Thread.sleep(20); } catch (InterruptedException e) {}
-                    }
-                    return;
+                TaskExecution updated = taskExec.withStatus(globalExec.status());
+                if (globalExec.status() == TaskStatus.COMPLETED) {
+                    updated = taskExec.complete(globalExec.result());
+                } else if (globalExec.status() == TaskStatus.FAILED) {
+                    updated = taskExec.fail(globalExec.error());
                 }
-
-                // Create updated version with new link
-                GlobalTaskExecution updated = globalExec.linkGraph(graphExec.id());
-
-                // Try atomic replace
-                if (globalTasks.replace(key, globalExec, updated)) {
-                    // Success!
-                    log.info("Successfully linked graph {} to global task {}", graphExec.id(), key);
-
-                    // Update task execution to match global task status
-                    TaskExecution queued = taskExec.withStatus(updated.status());
-                    taskExecutions.put(queued.id(), queued);
-
-                    if (testMode) {
-                        globalTasks.flush();
-                        taskExecutions.flush();
-                        try { Thread.sleep(50); } catch (InterruptedException e) {}
-                    }
-                    return;
-                } else {
-                    // Lost race, retry
-                    log.debug("Lost race to link graph (attempt {}), retrying...", attempt + 1);
-                    continue;
-                }
-
-            } else if (globalExec.status() == TaskStatus.COMPLETED) {
-                // Already completed - mark this task as completed immediately
-                log.info("Global task already completed: {}", key);
-
-                TaskExecution completed = taskExec.complete(globalExec.result());
-                taskExecutions.put(completed.id(), completed);
+                taskExecutions.put(updated.id(), updated);
 
                 if (testMode) {
                     taskExecutions.flush();
                     try { Thread.sleep(20); } catch (InterruptedException e) {}
                 }
 
-                // Re-evaluate graph to schedule downstream tasks
-                triggerEvaluation(graphExec.id());
-                return;
-
-            } else if (globalExec.status() == TaskStatus.FAILED) {
-                // Already failed - mark this task as failed
-                log.warn("Global task already failed: {}", key);
-
-                TaskExecution failed = taskExec.fail(globalExec.error());
-                taskExecutions.put(failed.id(), failed);
-
-                if (testMode) {
-                    taskExecutions.flush();
-                    try { Thread.sleep(20); } catch (InterruptedException e) {}
+                if (globalExec.status().isTerminal()) {
+                    triggerEvaluation(graphExec.id());
                 }
-
-                // Re-evaluate graph to mark downstream as skipped
-                triggerEvaluation(graphExec.id());
                 return;
             }
+
+            // CRITICAL FIX: Don't use replace(), use compute() for atomic read-modify-write
+            GlobalTaskExecution result = globalTasks.compute(key, (k, current) -> {
+                if (current == null) {
+                    // Key was removed, shouldn't happen but handle it
+                    return null;
+                }
+
+                // If already contains this graph, don't modify
+                if (current.linkedGraphExecutions().contains(graphExec.id())) {
+                    return current;
+                }
+
+                // Link the graph
+                return current.linkGraph(graphExec.id());
+            });
+
+            if (result != null && result.linkedGraphExecutions().contains(graphExec.id())) {
+                // Successfully linked!
+                log.info("Successfully linked graph {} to global task {} (status: {})",
+                        graphExec.id(), key, result.status());
+
+                TaskExecution taskUpdate = taskExec.withStatus(result.status());
+                if (result.status() == TaskStatus.COMPLETED) {
+                    taskUpdate = taskExec.complete(result.result());
+                } else if (result.status() == TaskStatus.FAILED) {
+                    taskUpdate = taskExec.fail(result.error());
+                }
+
+                taskExecutions.put(taskUpdate.id(), taskUpdate);
+
+                if (testMode) {
+                    globalTasks.flush();
+                    taskExecutions.flush();
+                    try { Thread.sleep(50); } catch (InterruptedException e) {}
+                }
+
+                if (result.status().isTerminal()) {
+                    triggerEvaluation(graphExec.id());
+                }
+
+                return;
+            }
+
+            // If we get here, something weird happened, retry
+            log.debug("Failed to link graph (attempt {}), retrying...", attempt + 1);
         }
 
-        // If we get here, we exceeded retry limit
         log.error("Failed to schedule global task after {} attempts: {}",
                 MAX_OPTIMISTIC_LOCK_RETRIES, key);
         markTaskFailed(taskExec, "Failed to coordinate global task execution");
