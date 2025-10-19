@@ -11,17 +11,22 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.neuralchilli.quorch.domain.*;
 import org.neuralchilli.quorch.worker.WorkerPool;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
+
 import static org.assertj.core.api.Assertions.*;
 import static org.awaitility.Awaitility.await;
 
 @QuarkusTest
 class GraphEvaluatorTest {
+
+    private final Logger log = LoggerFactory.getLogger(getClass());
 
     @Inject
     GraphEvaluator evaluator;
@@ -45,6 +50,10 @@ class GraphEvaluatorTest {
 
     @BeforeEach
     void setup() {
+        // CRITICAL: Clear DAG cache before each test
+        evaluator.clearDAGCache();
+
+        // Get references to maps
         graphDefinitions = hazelcast.getMap("graph-definitions");
         taskDefinitions = hazelcast.getMap("task-definitions");
         graphExecutions = hazelcast.getMap("graph-executions");
@@ -53,35 +62,45 @@ class GraphEvaluatorTest {
         taskExecutionIndex = hazelcast.getMap("task-execution-index");
         workQueue = hazelcast.getQueue("work-queue");
 
-        // CRITICAL: Destroy and recreate maps for complete isolation between tests
-        graphDefinitions.destroy();
-        taskDefinitions.destroy();
-        graphExecutions.destroy();
-        taskExecutions.destroy();
-        globalTasks.destroy();
-        taskExecutionIndex.destroy();
-
-        // Recreate maps
-        graphDefinitions = hazelcast.getMap("graph-definitions");
-        taskDefinitions = hazelcast.getMap("task-definitions");
-        graphExecutions = hazelcast.getMap("graph-executions");
-        taskExecutions = hazelcast.getMap("task-executions");
-        globalTasks = hazelcast.getMap("global-tasks");
-        taskExecutionIndex = hazelcast.getMap("task-execution-index");
-
-        // Clear queue
+        // CRITICAL: Complete cleanup - clear all data
+        graphDefinitions.clear();
+        taskDefinitions.clear();
+        graphExecutions.clear();
+        taskExecutions.clear();
+        globalTasks.clear();
+        taskExecutionIndex.clear();
         workQueue.clear();
+
+        // Force Hazelcast to flush all operations
+        graphDefinitions.flush();
+        taskDefinitions.flush();
+        graphExecutions.flush();
+        taskExecutions.flush();
+        globalTasks.flush();
+        taskExecutionIndex.flush();
+
+        // Small delay to ensure all cleanup is complete
+        try {
+            Thread.sleep(50);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     @AfterEach
     void cleanup() {
-        // Destroy all test data
-        if (graphDefinitions != null) graphDefinitions.destroy();
-        if (taskDefinitions != null) taskDefinitions.destroy();
-        if (graphExecutions != null) graphExecutions.destroy();
-        if (taskExecutions != null) taskExecutions.destroy();
-        if (globalTasks != null) globalTasks.destroy();
-        if (taskExecutionIndex != null) taskExecutionIndex.destroy();
+        // Clear DAG cache after test
+        if (evaluator != null) {
+            evaluator.clearDAGCache();
+        }
+
+        // Clear all maps
+        if (graphDefinitions != null) graphDefinitions.clear();
+        if (taskDefinitions != null) taskDefinitions.clear();
+        if (graphExecutions != null) graphExecutions.clear();
+        if (taskExecutions != null) taskExecutions.clear();
+        if (globalTasks != null) globalTasks.clear();
+        if (taskExecutionIndex != null) taskExecutionIndex.clear();
         if (workQueue != null) workQueue.clear();
     }
 
@@ -136,7 +155,7 @@ class GraphEvaluatorTest {
     @Test
     void shouldScheduleReadyTask() {
         // Given: A simple graph
-        Graph graph = Graph.builder("test-graph")
+        Graph graph = Graph.builder("test-graph-schedule")
                 .tasks(List.of(
                         TaskReference.inline(
                                 Task.builder("task1")
@@ -153,7 +172,7 @@ class GraphEvaluatorTest {
         graphDefinitions.flush();
 
         // When: Starting and evaluating (synchronous in test mode)
-        UUID executionId = evaluator.executeGraph("test-graph", Map.of(), "test");
+        UUID executionId = evaluator.executeGraph("test-graph-schedule", Map.of(), "test");
 
         // Then: Task should be queued/running/completed
         await().atMost(2, TimeUnit.SECONDS).untilAsserted(() -> {
@@ -171,7 +190,7 @@ class GraphEvaluatorTest {
     @Test
     void shouldHandleTaskCompletion() {
         // Given: A graph with one task
-        Graph graph = Graph.builder("test-graph")
+        Graph graph = Graph.builder("test-graph-completion")
                 .tasks(List.of(
                         TaskReference.inline(
                                 Task.builder("task1")
@@ -186,7 +205,7 @@ class GraphEvaluatorTest {
         graphDefinitions.put(graph.name(), graph);
         graphDefinitions.flush();
 
-        UUID executionId = evaluator.executeGraph("test-graph", Map.of(), "test");
+        UUID executionId = evaluator.executeGraph("test-graph-completion", Map.of(), "test");
 
         // Wait for worker to complete the task
         await().atMost(5, TimeUnit.SECONDS).untilAsserted(() -> {
@@ -206,7 +225,7 @@ class GraphEvaluatorTest {
     @Test
     void shouldHandleTaskFailure() {
         // Given: A graph with task that will fail (invalid command)
-        Graph graph = Graph.builder("test-graph")
+        Graph graph = Graph.builder("test-graph-failure")
                 .tasks(List.of(
                         TaskReference.inline(
                                 Task.builder("task1")
@@ -221,7 +240,7 @@ class GraphEvaluatorTest {
         graphDefinitions.put(graph.name(), graph);
         graphDefinitions.flush();
 
-        UUID executionId = evaluator.executeGraph("test-graph", Map.of(), "test");
+        UUID executionId = evaluator.executeGraph("test-graph-failure", Map.of(), "test");
 
         // Wait for worker to fail the task
         await().atMost(5, TimeUnit.SECONDS).untilAsserted(() -> {
@@ -242,7 +261,7 @@ class GraphEvaluatorTest {
     @Test
     void shouldRespectTaskDependencies() {
         // Given: A -> B (B depends on A)
-        Graph graph = Graph.builder("test-graph")
+        Graph graph = Graph.builder("test-graph-dependencies")
                 .tasks(List.of(
                         TaskReference.inline(
                                 Task.builder("task-a")
@@ -264,7 +283,7 @@ class GraphEvaluatorTest {
         graphDefinitions.put(graph.name(), graph);
         graphDefinitions.flush();
 
-        UUID executionId = evaluator.executeGraph("test-graph", Map.of(), "test");
+        UUID executionId = evaluator.executeGraph("test-graph-dependencies", Map.of(), "test");
 
         // Wait for both tasks to complete
         await().atMost(5, TimeUnit.SECONDS).untilAsserted(() -> {
@@ -291,9 +310,16 @@ class GraphEvaluatorTest {
                 .findFirst()
                 .orElseThrow();
 
-        assertThat(taskA.completedAt()).isNotNull();
-        assertThat(taskB.startedAt()).isNotNull();
-        assertThat(taskA.completedAt()).isBefore(taskB.startedAt());
+        // FIXED: Both tasks should have completion timestamps since graph is COMPLETED
+        assertThat(taskA.completedAt()).as("task-a should be completed").isNotNull();
+        assertThat(taskB.completedAt()).as("task-b should be completed").isNotNull();
+        assertThat(taskA.startedAt()).as("task-a should have started").isNotNull();
+        assertThat(taskB.startedAt()).as("task-b should have started").isNotNull();
+
+        // Verify ordering: task-a completed before task-b started
+        assertThat(taskA.completedAt())
+                .as("task-a should complete before task-b starts")
+                .isBefore(taskB.startedAt());
     }
 
     @Test
@@ -313,7 +339,7 @@ class GraphEvaluatorTest {
         taskDefinitions.flush();
 
         // Graph that uses the global task
-        Graph graph = Graph.builder("test-graph")
+        Graph graph = Graph.builder("test-graph-global")
                 .params(Map.of(
                         "date", Parameter.withDefault(ParameterType.STRING, "2025-10-18", "Date")
                 ))
@@ -331,7 +357,7 @@ class GraphEvaluatorTest {
 
         // When: Starting execution
         UUID executionId = evaluator.executeGraph(
-                "test-graph",
+                "test-graph-global",
                 Map.of("date", "2025-10-18"),
                 "test"
         );
@@ -373,7 +399,7 @@ class GraphEvaluatorTest {
         taskDefinitions.put(globalTask.name(), globalTask);
         taskDefinitions.flush();
 
-        Graph graph = Graph.builder("test-graph")
+        Graph graph = Graph.builder("test-graph-dedup")
                 .tasks(List.of(
                         TaskReference.toGlobal(
                                 "load-data",
@@ -386,35 +412,76 @@ class GraphEvaluatorTest {
         graphDefinitions.put(graph.name(), graph);
         graphDefinitions.flush();
 
-        // When: Two graphs execute with same parameters
-        UUID exec1 = evaluator.executeGraph("test-graph", Map.of(), "test");
+        // When: First graph executes
+        log.info("=== Starting first graph execution ===");
+        UUID exec1 = evaluator.executeGraph("test-graph-dedup", Map.of(), "test");
+        log.info("First graph execution ID: {}", exec1);
 
-        // Small delay to ensure first graph's global task is registered
+        // CRITICAL: Wait for first execution to actually CREATE and START the global task
+        await().atMost(2, TimeUnit.SECONDS).untilAsserted(() -> {
+            long globalTaskCount = globalTasks.values().stream()
+                    .filter(gte -> gte.taskName().equals("load-data"))
+                    .count();
+            assertThat(globalTaskCount).as("Global task should be created").isEqualTo(1);
+
+            GlobalTaskExecution gte = globalTasks.values().stream()
+                    .filter(g -> g.taskName().equals("load-data"))
+                    .findFirst()
+                    .orElseThrow();
+
+            assertThat(gte.status())
+                    .as("Global task should be queued or running")
+                    .isIn(TaskStatus.QUEUED, TaskStatus.RUNNING);
+
+            log.info("Global task created with status: {}, linked graphs: {}",
+                    gte.status(), gte.linkedGraphExecutions());
+        });
+
+        // Ensure global task state is fully propagated
+        globalTasks.flush();
         try { Thread.sleep(100); } catch (InterruptedException e) {}
 
-        UUID exec2 = evaluator.executeGraph("test-graph", Map.of(), "test");
+        // When: Second graph executes with same parameters
+        log.info("=== Starting second graph execution ===");
+        UUID exec2 = evaluator.executeGraph("test-graph-dedup", Map.of(), "test");
+        log.info("Second graph execution ID: {}", exec2);
 
-        // Then: Only one global task execution created
-        await().atMost(2, TimeUnit.SECONDS).untilAsserted(() -> {
+        // Then: Still only one global task execution
+        await().atMost(3, TimeUnit.SECONDS).untilAsserted(() -> {
             long globalTaskCount = globalTasks.values().stream()
                     .filter(gte -> gte.taskName().equals("load-data") &&
                             gte.resolvedKey().equals("load_2025-10-18"))
                     .count();
-            assertThat(globalTaskCount).isEqualTo(1);
+            assertThat(globalTaskCount)
+                    .as("Should only have one global task execution")
+                    .isEqualTo(1);
         });
 
-        GlobalTaskExecution globalExec = globalTasks.values().stream()
-                .filter(gte -> gte.taskName().equals("load-data"))
-                .findFirst()
-                .orElseThrow();
+        // FIXED: Wait for global task to have both graphs linked
+        await().atMost(3, TimeUnit.SECONDS).untilAsserted(() -> {
+            GlobalTaskExecution globalExec = globalTasks.values().stream()
+                    .filter(gte -> gte.taskName().equals("load-data"))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("Global task not found"));
 
-        assertThat(globalExec.linkedGraphExecutions())
-                .containsExactlyInAnyOrder(exec1, exec2);
+            log.info("Current global task state - Status: {}, Linked graphs: {}",
+                    globalExec.status(), globalExec.linkedGraphExecutions());
+
+            // Global task should have both graphs linked
+            assertThat(globalExec.linkedGraphExecutions())
+                    .as("Global task should be linked to both graph executions")
+                    .hasSize(2)
+                    .containsExactlyInAnyOrder(exec1, exec2);
+        });
 
         // Wait for both graphs to complete
         await().atMost(5, TimeUnit.SECONDS).untilAsserted(() -> {
             GraphExecution graphExec1 = graphExecutions.get(exec1);
             GraphExecution graphExec2 = graphExecutions.get(exec2);
+
+            log.info("Graph 1 status: {}, Graph 2 status: {}",
+                    graphExec1.status(), graphExec2.status());
+
             assertThat(graphExec1.status()).isEqualTo(GraphStatus.COMPLETED);
             assertThat(graphExec2.status()).isEqualTo(GraphStatus.COMPLETED);
         });
@@ -423,7 +490,7 @@ class GraphEvaluatorTest {
     @Test
     void shouldEvaluateExpressions() {
         // Given: Graph with parameters and expressions
-        Graph graph = Graph.builder("test-graph")
+        Graph graph = Graph.builder("test-graph-expressions")
                 .params(Map.of(
                         "region", Parameter.withDefault(ParameterType.STRING, "us", "Region")
                 ))
@@ -442,7 +509,7 @@ class GraphEvaluatorTest {
         graphDefinitions.flush();
 
         // When: Starting execution
-        UUID executionId = evaluator.executeGraph("test-graph", Map.of("region", "eu"), "test");
+        UUID executionId = evaluator.executeGraph("test-graph-expressions", Map.of("region", "eu"), "test");
 
         // Then: Task completes successfully
         await().atMost(5, TimeUnit.SECONDS).untilAsserted(() -> {

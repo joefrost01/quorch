@@ -534,10 +534,11 @@ public class GraphEvaluator {
         }
 
         TaskExecutionKey key = taskExec.globalKey();
-        log.debug("Global task key: {}", key);
+        log.info("Global task key: {}", key);
 
         // OPTIMISTIC LOCKING: Use compare-and-swap instead of distributed lock
         for (int attempt = 0; attempt < MAX_OPTIMISTIC_LOCK_RETRIES; attempt++) {
+            // CRITICAL: Get fresh copy each iteration to see updates from other threads
             GlobalTaskExecution globalExec = globalTasks.get(key);
 
             if (globalExec == null) {
@@ -572,12 +573,24 @@ public class GraphEvaluator {
                     // Success! We created it
                     log.info("Successfully created global task execution: {}", newGlobalExec.id());
 
+                    // Mark task execution as queued
+                    TaskExecution queued = taskExec.queue();
+                    taskExecutions.put(queued.id(), queued);
+
+                    // Force flush in test mode for immediate visibility
+                    if (testMode) {
+                        globalTasks.flush();
+                        taskExecutions.flush();
+                    }
+
                     // Schedule it
                     scheduleTask(taskExec, taskDef, graphExec);
                     return;
                 } else {
-                    // Someone else created it, retry
-                    log.debug("Lost race to create global task, retrying...");
+                    // Someone else created it, retry to link
+                    log.debug("Lost race to create global task, retrying to link...");
+                    // Sleep briefly to allow state to propagate
+                    try { Thread.sleep(50); } catch (InterruptedException e) {}
                     continue;
                 }
 
@@ -585,23 +598,46 @@ public class GraphEvaluator {
                     globalExec.status() == TaskStatus.RUNNING ||
                     globalExec.status() == TaskStatus.QUEUED) {
                 // Already running - try to link this graph using optimistic update
-                log.info("Linking graph {} to existing global task: {} (attempt {})",
-                        graphExec.id(), key, attempt + 1);
+                log.info("Linking graph {} to existing global task: {} (attempt {}, current status: {})",
+                        graphExec.id(), key, attempt + 1, globalExec.status());
+
+                // Check if already linked (idempotency)
+                if (globalExec.linkedGraphExecutions().contains(graphExec.id())) {
+                    log.info("Graph {} already linked to global task {}", graphExec.id(), key);
+
+                    // Update task execution to QUEUED
+                    TaskExecution queued = taskExec.queue();
+                    taskExecutions.put(queued.id(), queued);
+
+                    if (testMode) {
+                        taskExecutions.flush();
+                    }
+                    return;
+                }
 
                 GlobalTaskExecution updated = globalExec.linkGraph(graphExec.id());
 
                 // Try atomic replace
                 if (globalTasks.replace(key, globalExec, updated)) {
                     // Success!
-                    log.info("Successfully linked graph to global task");
+                    log.info("Successfully linked graph {} to global task {}", graphExec.id(), key);
 
                     // Update task execution to QUEUED
                     TaskExecution queued = taskExec.queue();
                     taskExecutions.put(queued.id(), queued);
+
+                    // CRITICAL: Force flush in test mode to ensure visibility
+                    if (testMode) {
+                        globalTasks.flush();
+                        taskExecutions.flush();
+                    }
+
                     return;
                 } else {
                     // Lost race, retry
-                    log.debug("Lost race to link graph, retrying...");
+                    log.debug("Lost race to link graph (attempt {}), retrying...", attempt + 1);
+                    // Sleep briefly to allow state to propagate
+                    try { Thread.sleep(50); } catch (InterruptedException e) {}
                     continue;
                 }
 
@@ -611,6 +647,10 @@ public class GraphEvaluator {
 
                 TaskExecution completed = taskExec.complete(globalExec.result());
                 taskExecutions.put(completed.id(), completed);
+
+                if (testMode) {
+                    taskExecutions.flush();
+                }
 
                 // Re-evaluate graph to schedule downstream tasks
                 triggerEvaluation(graphExec.id());
@@ -622,6 +662,10 @@ public class GraphEvaluator {
 
                 TaskExecution failed = taskExec.fail(globalExec.error());
                 taskExecutions.put(failed.id(), failed);
+
+                if (testMode) {
+                    taskExecutions.flush();
+                }
 
                 // Re-evaluate graph to mark downstream as skipped
                 triggerEvaluation(graphExec.id());
