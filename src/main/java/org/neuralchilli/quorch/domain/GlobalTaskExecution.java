@@ -11,7 +11,7 @@ import java.util.UUID;
 /**
  * Represents execution of a global task shared across multiple graphs.
  * Stored in Hazelcast for deduplication and state sharing.
- *
+ * <p>
  * NOTE: Linked graph executions are tracked separately in globalTaskLinks map
  * to avoid race conditions between linking and task state updates.
  */

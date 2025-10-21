@@ -1,10 +1,11 @@
 package org.neuralchilli.quorch.domain;
 
 import org.junit.jupiter.api.Test;
-import java.util.Map;
-import java.util.UUID;
 
-import static org.assertj.core.api.Assertions.*;
+import java.util.Map;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class GlobalTaskExecutionTest {
 

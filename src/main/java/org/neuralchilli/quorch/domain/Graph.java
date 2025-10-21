@@ -57,12 +57,29 @@ public final class Graph implements Serializable {
     }
 
     // Getters
-    public String name() { return name; }
-    public String description() { return description; }
-    public Map<String, Parameter> params() { return params; }
-    public Map<String, String> env() { return env; }
-    public String schedule() { return schedule; }
-    public List<TaskReference> tasks() { return tasks; }
+    public String name() {
+        return name;
+    }
+
+    public String description() {
+        return description;
+    }
+
+    public Map<String, Parameter> params() {
+        return params;
+    }
+
+    public Map<String, String> env() {
+        return env;
+    }
+
+    public String schedule() {
+        return schedule;
+    }
+
+    public List<TaskReference> tasks() {
+        return tasks;
+    }
 
     /**
      * Get all task names in this graph (for dependency validation)

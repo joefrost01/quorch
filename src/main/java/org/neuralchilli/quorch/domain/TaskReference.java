@@ -45,10 +45,21 @@ public final class TaskReference implements Serializable {
     }
 
     // Getters
-    public String taskName() { return taskName; }
-    public Task inlineTask() { return inlineTask; }
-    public Map<String, Object> params() { return params; }
-    public List<String> dependsOn() { return dependsOn; }
+    public String taskName() {
+        return taskName;
+    }
+
+    public Task inlineTask() {
+        return inlineTask;
+    }
+
+    public Map<String, Object> params() {
+        return params;
+    }
+
+    public List<String> dependsOn() {
+        return dependsOn;
+    }
 
     /**
      * Check if this is a reference to a global task

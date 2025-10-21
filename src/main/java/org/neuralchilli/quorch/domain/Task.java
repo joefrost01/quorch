@@ -79,16 +79,45 @@ public final class Task implements Serializable {
     }
 
     // Getters
-    public String name() { return name; }
-    public boolean global() { return global; }
-    public String key() { return key; }
-    public Map<String, Parameter> params() { return params; }
-    public String command() { return command; }
-    public List<String> args() { return args; }
-    public Map<String, String> env() { return env; }
-    public int timeout() { return timeout; }
-    public int retry() { return retry; }
-    public List<String> dependsOn() { return dependsOn; }
+    public String name() {
+        return name;
+    }
+
+    public boolean global() {
+        return global;
+    }
+
+    public String key() {
+        return key;
+    }
+
+    public Map<String, Parameter> params() {
+        return params;
+    }
+
+    public String command() {
+        return command;
+    }
+
+    public List<String> args() {
+        return args;
+    }
+
+    public Map<String, String> env() {
+        return env;
+    }
+
+    public int timeout() {
+        return timeout;
+    }
+
+    public int retry() {
+        return retry;
+    }
+
+    public List<String> dependsOn() {
+        return dependsOn;
+    }
 
     @Override
     public boolean equals(Object obj) {

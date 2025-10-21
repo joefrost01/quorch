@@ -1,9 +1,11 @@
 package org.neuralchilli.quorch.domain;
 
 import org.junit.jupiter.api.Test;
+
 import java.time.Duration;
 
-import static org.assertj.core.api.Assertions.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class WorkerTest {
 
@@ -23,7 +25,10 @@ class WorkerTest {
     void shouldUpdateHeartbeat() {
         Worker worker = Worker.create("worker-1", 4);
 
-        try { Thread.sleep(10); } catch (InterruptedException e) {}
+        try {
+            Thread.sleep(10);
+        } catch (InterruptedException e) {
+        }
 
         Worker updated = worker.heartbeat();
 

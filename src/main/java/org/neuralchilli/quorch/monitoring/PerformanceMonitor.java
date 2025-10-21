@@ -13,13 +13,13 @@ import java.util.concurrent.atomic.LongAdder;
 
 /**
  * Performance monitoring utility to track optimization gains.
- *
+ * <p>
  * Tracks metrics for:
  * - DAG cache hit rates
  * - Optimistic locking retry rates
  * - Batch operation efficiency
  * - Task throughput
- *
+ * <p>
  * Use this to verify performance improvements are working as expected.
  */
 @ApplicationScoped
@@ -120,7 +120,7 @@ public class PerformanceMonitor {
     /**
      * Record a batch operation.
      *
-     * @param itemCount Number of items in the batch
+     * @param itemCount  Number of items in the batch
      * @param callsSaved Number of network calls saved by batching
      */
     public void recordBatchOperation(int itemCount, int callsSaved) {
@@ -363,27 +363,27 @@ public class PerformanceMonitor {
         @Override
         public String toString() {
             return String.format("""
-                Performance Report:
-                ==================
-                DAG Cache:
-                  Hit Rate: %.1f%% (%d hits, %d misses)
-                  
-                Optimistic Locking:
-                  Success Rate: %.1f%% (%d successes, %d failures)
-                  Avg Retries: %.2f
-                  
-                Batch Operations:
-                  Operations: %d
-                  Avg Batch Size: %.1f items
-                  Network Calls Saved: %d
-                  
-                Task Execution:
-                  Success Rate: %.1f%%
-                  Scheduled: %d, Completed: %d, Failed: %d
-                  
-                Worker Pool:
-                  Event Efficiency: %.1f%% (%d wakeups, %d timeouts)
-                """,
+                            Performance Report:
+                            ==================
+                            DAG Cache:
+                              Hit Rate: %.1f%% (%d hits, %d misses)
+                            
+                            Optimistic Locking:
+                              Success Rate: %.1f%% (%d successes, %d failures)
+                              Avg Retries: %.2f
+                            
+                            Batch Operations:
+                              Operations: %d
+                              Avg Batch Size: %.1f items
+                              Network Calls Saved: %d
+                            
+                            Task Execution:
+                              Success Rate: %.1f%%
+                              Scheduled: %d, Completed: %d, Failed: %d
+                            
+                            Worker Pool:
+                              Event Efficiency: %.1f%% (%d wakeups, %d timeouts)
+                            """,
                     dagCacheHitRate, dagCacheHits, dagCacheMisses,
                     optimisticLockSuccessRate, optimisticLockSuccesses, optimisticLockFailures,
                     avgOptimisticLockRetries,

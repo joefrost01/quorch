@@ -35,10 +35,21 @@ public final class Parameter implements Serializable {
     }
 
     // Getters
-    public ParameterType type() { return type; }
-    public Object defaultValue() { return defaultValue; }
-    public boolean required() { return required; }
-    public String description() { return description; }
+    public ParameterType type() {
+        return type;
+    }
+
+    public Object defaultValue() {
+        return defaultValue;
+    }
+
+    public boolean required() {
+        return required;
+    }
+
+    public String description() {
+        return description;
+    }
 
     /**
      * Create a parameter with no default (optional)

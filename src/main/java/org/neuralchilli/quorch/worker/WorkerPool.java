@@ -12,9 +12,9 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.neuralchilli.quorch.core.TaskCompletionEvent;
-import org.neuralchilli.quorch.core.TaskFailureEvent;
-import org.neuralchilli.quorch.core.WorkMessage;
+import org.neuralchilli.quorch.domain.TaskCompletionEvent;
+import org.neuralchilli.quorch.domain.TaskFailureEvent;
+import org.neuralchilli.quorch.domain.WorkMessage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -22,7 +22,10 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
@@ -30,12 +33,12 @@ import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Worker pool with event-driven task pickup.
- *
+ * <p>
  * PERFORMANCE OPTIMIZATION: Replace polling with listener pattern
  * - Eliminates wasteful polling when queue is empty
  * - Reduces network traffic to Hazelcast by ~90% during idle periods
  * - Workers wake immediately when work is available (no 5-second delay)
- *
+ * <p>
  * Old approach: 160 threads × 12 polls/min = 1,920 polls/min when idle
  * New approach: 0 polls when idle, immediate wake on work arrival
  */
@@ -131,7 +134,7 @@ public class WorkerPool {
     /**
      * Register a listener on the work queue for event-driven task pickup.
      * When work arrives, wake up waiting threads immediately.
-     *
+     * <p>
      * PERFORMANCE: Eliminates polling overhead during idle periods
      */
     private void registerQueueListener() {

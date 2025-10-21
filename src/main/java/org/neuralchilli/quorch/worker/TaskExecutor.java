@@ -1,14 +1,14 @@
 package org.neuralchilli.quorch.worker;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import org.neuralchilli.quorch.core.ExpressionEvaluator;
-import org.neuralchilli.quorch.core.WorkMessage;
+import org.neuralchilli.quorch.domain.WorkMessage;
+import org.neuralchilli.quorch.service.ExpressionEvaluatorService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -32,7 +32,7 @@ public class TaskExecutor {
     boolean trialRun;
 
     @Inject
-    ExpressionEvaluator expressionEvaluator;
+    ExpressionEvaluatorService expressionEvaluatorService;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -44,16 +44,16 @@ public class TaskExecutor {
      */
     public TaskResult execute(WorkMessage work) {
         // Evaluate all expressions in the work message
-        String command = expressionEvaluator.evaluate(work.command(), work.context());
+        String command = expressionEvaluatorService.evaluate(work.command(), work.context());
 
         List<String> args = work.args().stream()
-                .map(arg -> expressionEvaluator.evaluate(arg, work.context()))
+                .map(arg -> expressionEvaluatorService.evaluate(arg, work.context()))
                 .collect(Collectors.toList());
 
         Map<String, String> env = work.env().entrySet().stream()
                 .collect(Collectors.toMap(
                         Map.Entry::getKey,
-                        e -> expressionEvaluator.evaluate(e.getValue(), work.context())
+                        e -> expressionEvaluatorService.evaluate(e.getValue(), work.context())
                 ));
 
         // Build full command
@@ -156,7 +156,7 @@ public class TaskExecutor {
             } else {
                 // Non-zero exit code
                 return TaskResult.failure(
-                        "Task exited with code " + exitCode + "\n" + output.toString());
+                        "Task exited with code " + exitCode + "\n" + output);
             }
 
         } catch (IOException e) {
@@ -171,7 +171,7 @@ public class TaskExecutor {
     /**
      * Try to parse the last line of output as JSON.
      * This allows tasks to pass structured data to downstream tasks.
-     *
+     * <p>
      * If the last line is valid JSON, return it as a map.
      * Otherwise, return the full output as a string.
      */
@@ -188,7 +188,8 @@ public class TaskExecutor {
             if (lastLine.startsWith("{") && lastLine.endsWith("}")) {
                 Map<String, Object> parsed = objectMapper.readValue(
                         lastLine,
-                        new TypeReference<Map<String, Object>>() {}
+                        new TypeReference<Map<String, Object>>() {
+                        }
                 );
                 return parsed;
             }

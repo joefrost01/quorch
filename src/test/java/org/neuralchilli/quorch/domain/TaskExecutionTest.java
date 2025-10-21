@@ -1,10 +1,12 @@
 package org.neuralchilli.quorch.domain;
 
 import org.junit.jupiter.api.Test;
+
 import java.util.Map;
 import java.util.UUID;
 
-import static org.assertj.core.api.Assertions.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class TaskExecutionTest {
 
@@ -52,7 +54,10 @@ class TaskExecutionTest {
         TaskExecution started = exec.start("worker-1", "thread-1");
 
         // Small delay to ensure duration > 0
-        try { Thread.sleep(10); } catch (InterruptedException e) {}
+        try {
+            Thread.sleep(10);
+        } catch (InterruptedException e) {
+        }
 
         TaskExecution completed = started.complete(Map.of("result", "success"));
 

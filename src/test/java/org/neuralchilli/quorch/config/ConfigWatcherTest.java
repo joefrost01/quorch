@@ -6,23 +6,23 @@ import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
+import org.neuralchilli.quorch.service.GraphLoaderService;
+import org.neuralchilli.quorch.service.LoadResult;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
 import java.util.Map;
-import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Tests for ConfigWatcher - verifies hot reload functionality in dev mode.
- *
+ * <p>
  * Note: These tests use real filesystem operations and file watching,
  * so they may be slower and more fragile than pure unit tests.
  */
@@ -34,7 +34,7 @@ class ConfigWatcherTest {
     private Path graphsDir;
     private Path tasksDir;
     private ConfigWatcher configWatcher;
-    private GraphLoader graphLoader;
+    private GraphLoaderService graphLoaderService;
 
     @BeforeEach
     void setup() throws IOException {
@@ -46,7 +46,7 @@ class ConfigWatcherTest {
         Files.createDirectories(tasksDir);
 
         // Create mock GraphLoader
-        graphLoader = mock(GraphLoader.class);
+        graphLoaderService = mock(GraphLoaderService.class);
 
         // Create ConfigWatcher with test paths
         configWatcher = new ConfigWatcher();
@@ -83,7 +83,7 @@ class ConfigWatcherTest {
     @Test
     void shouldDetectNewGraphFile() throws IOException {
         // Given: GraphLoader returns success
-        when(graphLoader.reloadGraph(any(Path.class)))
+        when(graphLoaderService.reloadGraph(any(Path.class)))
                 .thenReturn(LoadResult.success("test-graph"));
 
         // When: Create a new graph file

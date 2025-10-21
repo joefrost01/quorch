@@ -1,11 +1,14 @@
 package org.neuralchilli.quorch.config;
 
+import jakarta.enterprise.context.ApplicationScoped;
 import org.neuralchilli.quorch.domain.*;
 import org.yaml.snakeyaml.Yaml;
-import jakarta.enterprise.context.ApplicationScoped;
 
 import java.io.InputStream;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 /**

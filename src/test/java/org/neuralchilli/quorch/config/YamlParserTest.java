@@ -8,9 +8,9 @@ import org.neuralchilli.quorch.domain.Task;
 import org.neuralchilli.quorch.domain.TaskReference;
 
 import java.util.List;
-import java.util.Map;
 
-import static org.assertj.core.api.Assertions.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Tests for YamlParser.
@@ -414,27 +414,27 @@ class YamlParserTest {
     void shouldParseTaskWithAllParameterTypes() {
         // Given: Task with various parameter types
         String yaml = """
-            name: param-types-task
-            params:
-              string_param:
-                type: string
-                default: "hello"
-              integer_param:
-                type: integer
-                default: 42
-              boolean_param:
-                type: boolean
-                default: true
-              date_param:
-                type: date
-                default: "${date.today()}"
-              array_param:
-                type: array
-                default: [1, 2, 3]
-            command: echo
-            args:
-              - test
-            """;
+                name: param-types-task
+                params:
+                  string_param:
+                    type: string
+                    default: "hello"
+                  integer_param:
+                    type: integer
+                    default: 42
+                  boolean_param:
+                    type: boolean
+                    default: true
+                  date_param:
+                    type: date
+                    default: "${date.today()}"
+                  array_param:
+                    type: array
+                    default: [1, 2, 3]
+                command: echo
+                args:
+                  - test
+                """;
 
         // When: Parse
         Task task = yamlParser.parseTask(yaml);
@@ -453,12 +453,12 @@ class YamlParserTest {
     void shouldFailOnInvalidYaml() {
         // Given: Invalid YAML
         String yaml = """
-            name: invalid-graph
-            tasks:
-              - name: task1
-                command: echo
-                invalid indentation
-            """;
+                name: invalid-graph
+                tasks:
+                  - name: task1
+                    command: echo
+                    invalid indentation
+                """;
 
         // When/Then: Should throw exception (don't check specific message, just that it fails)
         assertThatThrownBy(() -> yamlParser.parseGraph(yaml))
@@ -518,14 +518,14 @@ class YamlParserTest {
         // Given: Task reference with both 'name' and 'task' fields
         // Note: The parser might allow this and just pick one, or handle it differently
         String yaml = """
-            name: invalid-graph
-            tasks:
-              - name: inline-task
-                task: global-task
-                command: echo
-                args:
-                  - hello
-            """;
+                name: invalid-graph
+                tasks:
+                  - name: inline-task
+                    task: global-task
+                    command: echo
+                    args:
+                      - hello
+                """;
 
         // When: Parse (this might actually succeed if parser is lenient)
         Graph graph = yamlParser.parseGraph(yaml);
@@ -540,12 +540,12 @@ class YamlParserTest {
     void shouldFailOnTaskWithNeitherNameNorTaskFields() {
         // Given: Task reference with neither 'name' nor 'task' fields (invalid)
         String yaml = """
-            name: invalid-graph
-            tasks:
-              - command: echo
-                args:
-                  - hello
-            """;
+                name: invalid-graph
+                tasks:
+                  - command: echo
+                    args:
+                      - hello
+                """;
 
         // When/Then: Should throw exception with appropriate message
         assertThatThrownBy(() -> yamlParser.parseGraph(yaml))
@@ -557,10 +557,10 @@ class YamlParserTest {
     void shouldParseEmptyTaskList() {
         // Given: Graph with no tasks
         String yaml = """
-            name: empty-graph
-            description: No tasks
-            tasks: []
-            """;
+                name: empty-graph
+                description: No tasks
+                tasks: []
+                """;
 
         // When/Then: Parser might reject empty task lists
         // Adjust based on actual validation rules
@@ -652,13 +652,13 @@ class YamlParserTest {
     void shouldHandleNullValues() {
         // Given: YAML with minimal required fields
         String yaml = """
-            name: null-values-graph
-            tasks:
-              - name: task1
-                command: echo
-                args:
-                  - hello
-            """;
+                name: null-values-graph
+                tasks:
+                  - name: task1
+                    command: echo
+                    args:
+                      - hello
+                """;
 
         // When: Parse
         Graph graph = yamlParser.parseGraph(yaml);

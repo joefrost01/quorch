@@ -7,6 +7,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
+import org.neuralchilli.quorch.service.GraphLoaderService;
+import org.neuralchilli.quorch.service.LoadResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -29,7 +31,7 @@ public class ConfigWatcher {
     private static final Logger log = LoggerFactory.getLogger(ConfigWatcher.class);
 
     @Inject
-    GraphLoader graphLoader;
+    GraphLoaderService graphLoaderService;
 
     @ConfigProperty(name = "orchestrator.config.graphs")
     String graphsPath;
@@ -169,9 +171,9 @@ public class ConfigWatcher {
             LoadResult result;
 
             if (dirName.equals("graphs")) {
-                result = graphLoader.reloadGraph(fullPath);
+                result = graphLoaderService.reloadGraph(fullPath);
             } else if (dirName.equals("tasks")) {
-                result = graphLoader.reloadTask(fullPath);
+                result = graphLoaderService.reloadTask(fullPath);
             } else {
                 log.warn("Unknown directory: {}", dirName);
                 return;

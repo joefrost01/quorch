@@ -13,12 +13,15 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.neuralchilli.quorch.domain.GlobalTaskExecution;
 import org.neuralchilli.quorch.domain.GraphExecution;
 import org.neuralchilli.quorch.domain.TaskExecution;
+import org.neuralchilli.quorch.serializer.GlobalTaskExecutionSerializer;
+import org.neuralchilli.quorch.serializer.GraphExecutionSerializer;
+import org.neuralchilli.quorch.serializer.TaskExecutionSerializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
  * Configures and produces the Hazelcast instance with custom serializers.
- *
+ * <p>
  * Performance improvements:
  * - Custom serializers are 2-5x faster than Java serialization
  * - Payloads are 3-4x smaller, reducing network overhead
