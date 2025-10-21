@@ -194,7 +194,7 @@ public class ConfigWatcher {
         return fileName.endsWith(".yaml") || fileName.endsWith(".yml");
     }
 
-    private void stopWatching() {
+    void stopWatching() {
         if (!watchEnabled || watchService == null) {
             return;
         }

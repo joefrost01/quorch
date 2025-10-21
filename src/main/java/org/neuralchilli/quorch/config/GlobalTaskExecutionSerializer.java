@@ -22,7 +22,7 @@ import java.util.UUID;
  */
 public class GlobalTaskExecutionSerializer implements StreamSerializer<GlobalTaskExecution> {
 
-    private static final int TYPE_ID = 1003;
+    static final int TYPE_ID = 1003;
 
     @Override
     public int getTypeId() {

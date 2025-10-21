@@ -81,6 +81,7 @@ public class GraphEvaluator {
         GraphExecution execution = GraphExecution.create(graphName, params, triggeredBy);
         graphExecutions.put(execution.id(), execution);
         log.info("Created graph execution: {} for graph: {}", execution.id(), graphName);
+        log.debug("Graph execution {} params: {}", execution.id(), params);
 
         createTaskExecutions(execution, graph);
 
@@ -118,6 +119,8 @@ public class GraphEvaluator {
             TaskExecutionKey globalKey = null;
             if (isGlobal) {
                 globalKey = resolveGlobalKey(taskRef, graphExec, graph);
+                log.debug("Creating task execution for graph {}: taskName={}, isGlobal={}, globalKey={}",
+                        graphExec.id(), taskName, isGlobal, globalKey);
             }
 
             TaskExecution taskExec = TaskExecution.create(
@@ -184,7 +187,8 @@ public class GraphEvaluator {
         String resolvedKey = expressionEvaluator.evaluate(globalTask.key(), context);
 
         log.debug("Resolved global key: {} for task: {}", resolvedKey, taskRef.taskName());
-
+        log.debug("Global key resolution details - taskName: {}, keyExpression: {}, resolvedParams: {}, resolvedKey: {}",
+                taskRef.taskName(), globalTask.key(), resolvedParams, resolvedKey);
         return TaskExecutionKey.of(taskRef.taskName(), resolvedKey);
     }
 
@@ -210,22 +214,16 @@ public class GraphEvaluator {
             TaskExecutionKey key = taskExec.globalKey();
             log.info("Updating global task state for key: {}", key);
 
-            for (int attempt = 0; attempt < MAX_OPTIMISTIC_LOCK_RETRIES; attempt++) {
-                GlobalTaskExecution globalExec = globalTasks.get(key);
-                if (globalExec == null) {
-                    log.warn("Global task not found for key: {}", key);
-                    break;
-                }
-
+            // Use a simpler approach - just update directly without optimistic locking
+            // since we're the only one who should be completing this task
+            GlobalTaskExecution globalExec = globalTasks.get(key);
+            if (globalExec == null) {
+                log.warn("Global task not found for key: {}", key);
+            } else {
                 // Update to completed status with result
                 GlobalTaskExecution completedGlobal = globalExec.complete(event.result());
-
-                if (globalTasks.replace(key, globalExec, completedGlobal)) {
-                    log.info("Successfully updated global task {} to COMPLETED", key);
-                    break;
-                }
-
-                log.debug("Retrying global task state update for key: {}", key);
+                globalTasks.put(key, completedGlobal);
+                log.info("Successfully updated global task {} to COMPLETED", key);
             }
         }
 
@@ -274,22 +272,15 @@ public class GraphEvaluator {
                 TaskExecutionKey key = taskExec.globalKey();
                 log.info("Updating global task state to FAILED for key: {}", key);
 
-                for (int attempt = 0; attempt < MAX_OPTIMISTIC_LOCK_RETRIES; attempt++) {
-                    GlobalTaskExecution globalExec = globalTasks.get(key);
-                    if (globalExec == null) {
-                        log.warn("Global task not found for key: {}", key);
-                        break;
-                    }
-
+                // Use simpler approach without optimistic locking
+                GlobalTaskExecution globalExec = globalTasks.get(key);
+                if (globalExec == null) {
+                    log.warn("Global task not found for key: {}", key);
+                } else {
                     // Update to failed status with error
                     GlobalTaskExecution failedGlobal = globalExec.fail(event.error());
-
-                    if (globalTasks.replace(key, globalExec, failedGlobal)) {
-                        log.info("Successfully updated global task {} to FAILED", key);
-                        break;
-                    }
-
-                    log.debug("Retrying global task state update for key: {}", key);
+                    globalTasks.put(key, failedGlobal);
+                    log.info("Successfully updated global task {} to FAILED", key);
                 }
             }
 
@@ -486,6 +477,7 @@ public class GraphEvaluator {
 
             if (existing == null) {
                 // We created it!
+                globalExec = newGlobalExec;
                 log.info("Successfully created global task execution: {}", newGlobalExec.id());
 
                 // Queue the actual work
@@ -504,7 +496,7 @@ public class GraphEvaluator {
 
         // CRITICAL: Update our task execution based on global task status
         // This ensures that graphs linking to already-completed tasks get the right status
-        if (globalExec != null) {
+        if (globalExec != null && globalExec.status().isTerminal()) {
             TaskExecution updated = taskExec.withStatus(globalExec.status());
             if (globalExec.status() == TaskStatus.COMPLETED) {
                 updated = taskExec.complete(globalExec.result());
@@ -516,17 +508,15 @@ public class GraphEvaluator {
             taskExecutions.put(updated.id(), updated);
 
             // If the global task is already done, trigger immediate evaluation
-            if (globalExec.status().isTerminal()) {
-                log.info("Global task is terminal ({}), triggering immediate evaluation for graph {}",
-                        globalExec.status(), graphExec.id());
+            log.info("Global task is terminal ({}), triggering immediate evaluation for graph {}",
+                    globalExec.status(), graphExec.id());
 
-                if (testMode) {
-                    taskExecutions.flush();
-                    try { Thread.sleep(50); } catch (InterruptedException e) {}
-                }
-
-                triggerEvaluation(graphExec.id());
+            if (testMode) {
+                taskExecutions.flush();
+                try { Thread.sleep(50); } catch (InterruptedException e) {}
             }
+
+            triggerEvaluation(graphExec.id());
         }
 
         if (testMode) {

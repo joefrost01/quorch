@@ -267,6 +267,10 @@ public class WorkerPool {
                     work.taskExecutionId(),
                     "Exception: " + e.getMessage()
             );
+
+            log.debug("Publishing task completion event - taskExecId: {}, taskName: {}",
+                    work.taskExecutionId(), work.taskName());
+
             eventBus.publish("task.failed", event);
         }
     }

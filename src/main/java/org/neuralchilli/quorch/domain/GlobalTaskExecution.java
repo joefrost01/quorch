@@ -1,5 +1,8 @@
 package org.neuralchilli.quorch.domain;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.Serializable;
 import java.time.Instant;
 import java.util.Map;
@@ -25,6 +28,8 @@ public record GlobalTaskExecution(
         Map<String, Object> result,
         String error
 ) implements Serializable {
+
+    private static final Logger log = LoggerFactory.getLogger(GlobalTaskExecution.class);
 
     public GlobalTaskExecution {
         if (id == null) {
@@ -86,6 +91,7 @@ public record GlobalTaskExecution(
      * Mark as queued
      */
     public GlobalTaskExecution queue() {
+        log.debug("Queueing global task: {} (key: {})", id, resolvedKey);
         return withStatus(TaskStatus.QUEUED);
     }
 
@@ -103,6 +109,7 @@ public record GlobalTaskExecution(
      * Mark as completed
      */
     public GlobalTaskExecution complete(Map<String, Object> taskResult) {
+        log.debug("Completing global task: {} (key: {}) with result: {}", id, resolvedKey, taskResult);
         return new GlobalTaskExecution(
                 id, taskName, resolvedKey, params, TaskStatus.COMPLETED,
                 workerId, threadName, startedAt, Instant.now(), taskResult, null
